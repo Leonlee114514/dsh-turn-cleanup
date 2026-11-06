@@ -102,8 +102,24 @@ if (turnEnds && this.inbox.nextStep.length === 0) break;
 
 ## 安装
 
-插件没有 `dsh.bundle`，走手工 link + patch 注册（`plugin_manager install_bundle` 只接受带
-`dsh.bundle` 的包）。
+包带 `dsh.bundle`，所以两种装法都行。
+
+**A. 走市场 / bundle 安装（推荐）**
+
+```
+plugin_manager install_bundle → "dsh-turn-cleanup"
+```
+
+或命令行：
+
+```bash
+dsh plugin --profile <name> add dsh-turn-cleanup
+```
+
+包根的 `cordis.patch.yml` 会被自动应用，闸门默认开启，配置用默认值。要改配置就在自己 profile 的
+`cordis.patch.yml` 里按同一个 id 覆盖，不要另加一条 `- insert`（同 id 两条会被 cordis 拒绝注册）。
+
+**B. 手工 link（源码改动时用，改完 HMR 直接生效）**
 
 ```bash
 # 1. 克隆到本地
@@ -123,7 +139,8 @@ symlinkSync(
 ```
 
 ```yaml
-# 4. 在 ~/.dsh/profiles/desktop/cordis.patch.yml 顶层加条目
+# 4. 只在手工 link 时需要：在 ~/.dsh/profiles/desktop/cordis.patch.yml 顶层加条目
+#    （走 A 的 bundle 安装则跳过这步，包根的 cordis.patch.yml 已经带了同一条）
 - insert:
     - id: turn-cleanup
       name: dsh-turn-cleanup
