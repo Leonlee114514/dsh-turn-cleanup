@@ -43,7 +43,7 @@ jobs:
 
       # 假 ctx 模拟 agent-loop 的调用顺序，不依赖 DSH 运行时。
       # 覆盖：正例 / 约定目录 / 交付物反例 / 存量反例 / 防抖 / 子会话 / 禁用。
-      - name: Behaviour simulation (7 acceptance cases)
+      - name: Behaviour simulation (14 scenarios / 35 assertions)
         run: node test/sim.mjs
 
       # 插件必须能在任何 OS 上跑：路径分隔符、大小写敏感性、临时目录位置都不同。
@@ -81,5 +81,5 @@ jobs:
             node --check "$f"
           done
 
-      - name: Behaviour simulation (7 acceptance cases)
+      - name: Behaviour simulation (14 scenarios / 35 assertions)
         run: node test/sim.mjs

@@ -261,9 +261,12 @@ await scenario('6 子会话 subagent', {
   check('10 原件缺失 · 备份段不出现（无参照物不催删）', !text.includes('备份超量'), text.slice(0, 40))
 }
 
-// 11 备份 prune + 符号链接 → 跳过，不跟链
+// 11 备份 prune + 符号链接 → 不删链接，但列入清单交模型处理
 // Windows 非管理员默认不能建 file symlink（EPERM），这种情况下明确标 SKIP，
-// 不把「建不出链接」伪装成「守卫通过」。
+// 不把「建不出链接」伪装成「守卫通过」。GitHub 的 windows-latest 开了开发者模式，
+// 能建链接 —— 这条分支只在 CI 上真跑，本地 SKIP。
+//
+// 注意 utimes 会顺着符号链接改到目标，要改链接自身的时间戳必须用 lutimes。
 {
   const root = base + '/s11'
   await mkdir(root, { recursive: true })
@@ -283,23 +286,31 @@ await scenario('6 子会话 subagent', {
   if (!canSymlink) {
     check('11 符号链接 · 跳过（本机不能建 file symlink）', true, 'SKIP: EPERM without admin/developer mode')
   } else {
-    // 造 4 个备份，最旧两个是指向真实文件的符号链接 —— 应当被 lstat 守卫挡住
-    for (let i = 0; i < 4; i++) {
+    // 造 4 个备份：最旧的是指向 link-target.txt 的符号链接（v0），另三个是真文件。
+    // planBackups 用 stat（跟链）取 mtime，v0 拿到的是目标的 1700000000 —— 最旧。
+    // keep=2 ⇒ 排序 v3,v2,v1,v0 ⇒ kept=[v3,v2]、excess=[v1,v0]。
+    // prune 应当删 v1（真文件），跳过 v0（符号链接），并把 v0 留在清单里交模型处理。
+    await utimes(target, 1700000000, 1700000000)
+    await symlink(target, join(root, 'real.txt.bak-v0'))
+    for (let i = 1; i < 4; i++) {
       const p = join(root, `real.txt.bak-v${i}`)
-      if (i < 2) await symlink(target, p)
-      else await writeFile(p, `b${i}`)
-      try { await utimes(p, 1700000000 + i, 1700000000 + i) } catch {}
+      await writeFile(p, `b${i}`)
+      await utimes(p, 1700000000 + i, 1700000000 + i)
     }
-    await scenario('11 prune 符号链接跳过', {
+    await scenario('11 prune 符号链接不删但列入清单', {
       root,
       recorded: ['real.txt'],
-      expectSteer: false,
+      expectSteer: true,
       config: { backupRetention: { keep: 2, mode: 'prune' } }
     })
     const alive = []
     for (let i = 0; i < 4; i++) if (await exists(join(root, `real.txt.bak-v${i}`))) alive.push(i)
-    check('11 符号链接 · 未被删（仍在）', alive.length === 4, `alive=${alive.join(',')}`)
+    check('11 符号链接 · 链接本身未被删', alive.includes(0), `alive=${alive.join(',')}`)
     check('11 符号链接 · 链接目标未受影响', await exists(target), 'target alive')
+    check('11 符号链接 · 超量真文件备份已删', !alive.includes(1), `alive=${alive.join(',')}`)
+    check('11 符号链接 · 最新 keep 份未动', alive.includes(2) && alive.includes(3), `alive=${alive.join(',')}`)
+    const line = log.map(([, m]) => m).filter((m) => m.includes('turn=1') && m.includes('real.txt.bak-v0')).pop() ?? ''
+    check('11 符号链接 · 跳过的链接进了 steer 清单', line.includes('real.txt.bak-v0'), line.slice(0, 120))
   }
 }
 
