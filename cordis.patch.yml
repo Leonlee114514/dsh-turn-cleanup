@@ -1,0 +1,33 @@
+# dsh-turn-cleanup — bundle manifest entry.
+#
+# `dsh plugin add dsh-turn-cleanup` applies this patch, which mounts the gate
+# with its defaults on. Override any key under the same id in your own profile's
+# cordis.patch.yml:
+#
+#   enabled: false          → installed but inert (no listener registered at all)
+#   tmpDirName: .scratch    → a different convention directory
+#   patterns: ["probe-*"]   → a narrower set of temporary-file patterns
+#
+# If you already registered the plugin by hand (manual link + a `- id: turn-cleanup`
+# row of your own), remove that row first: two rows with the same loader entry id
+# make cordis reject the duplicate, and the plugin would install without
+# registering.
+- insert:
+    - id: turn-cleanup
+      name: dsh-turn-cleanup
+      inject: []
+      config:
+        enabled: true
+        tmpDirName: .agent-tmp
+        patterns:
+          - "probe-*"
+          - "tmp-*"
+          - "scratch-*"
+          - "check*"
+          - "diag_*"
+          - "bench*"
+          - "*.bak-*"
+        scanDepth: 4
+        maxLogPaths: 10
+        maxSteerPaths: 20
+        logFile: ""
