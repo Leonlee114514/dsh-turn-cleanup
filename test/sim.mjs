@@ -1,6 +1,7 @@
 // 本地行为验证：用假 ctx 模拟 agent-loop 的调用顺序，不依赖 DSH 运行时。
-// 覆盖：正例 / 约定目录 / 交付物反例 / 存量反例 / 防抖 / 子会话 / 禁用。
-import { mkdir, writeFile, rm, stat } from 'node:fs/promises'
+// 覆盖：正例 / 约定目录 / 交付物反例 / 存量反例 / 防抖 / 子会话 / 禁用 /
+//       备份保留（steer 模式、prune 模式、原件缺失、符号链接、keep 边界）。
+import { mkdir, writeFile, rm, stat, symlink, utimes } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { apply, name, inject } from '../lib/index.js'
@@ -59,7 +60,16 @@ function check(label, pass, detail) {
   console.log(`${pass ? 'PASS' : 'FAIL'}  ${label}${detail ? '  — ' + detail : ''}`)
 }
 
-async function scenario(label, { root, setup, origin, delegationDepth, files, expectSteer, expectFiles, config = {}, steps = 1 }) {
+async function exists(abs) {
+  try {
+    await stat(abs)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function scenario(label, { root, setup, origin, delegationDepth, files, recorded, expectSteer, expectFiles, config = {}, steps = 1 }) {
   const ctx = makeCtx()
   apply(ctx, { enabled: true, ...config })
   const { agent, steered } = makeAgent(root, { origin, delegationDepth })
@@ -68,11 +78,17 @@ async function scenario(label, { root, setup, origin, delegationDepth, files, ex
   // turn 1 开始
   await ctx.emitPlain('session/event', agent.session, { type: 'turn/start', data: { turn: 1 } })
 
-  // 模拟本 turn 的写入
+  // 模拟本 turn 的写入（真写，会刷新 mtime）
   for (const f of files ?? []) {
     const abs = join(root, f)
     await mkdir(join(abs, '..'), { recursive: true })
     await writeFile(abs, 'x')
+    await ctx.emitWaterfall('fs/write-intent', { targetKey: abs }, { agent }, () => undefined)
+  }
+
+  // 只登记写入意图、不重写文件（保住 mtime 顺序，用于备份家族判定）
+  for (const f of recorded ?? []) {
+    const abs = join(root, f)
     await ctx.emitWaterfall('fs/write-intent', { targetKey: abs }, { agent }, () => undefined)
   }
 
@@ -92,14 +108,28 @@ async function scenario(label, { root, setup, origin, delegationDepth, files, ex
   if (expectFiles !== undefined) {
     const alive = []
     for (const f of expectFiles) {
-      try {
-        await stat(join(root, f))
-        alive.push(f)
-      } catch {}
+      if (await exists(join(root, f))) alive.push(f)
     }
     check(label + ' · 文件仍在（插件不删文件）', alive.length === expectFiles.length, `alive=${alive.join(',') || '-'}`)
   }
   return { steered, steers }
+}
+
+/** 造一份带确定 mtime 的备份家族：mtime 越大越新。 */
+async function makeFamily(root, stem, count, { withOriginal = true, startSec = 1700000000 } = {}) {
+  await mkdir(root, { recursive: true })
+  if (withOriginal) {
+    await writeFile(join(root, stem), 'original')
+    await utimes(join(root, stem), startSec + count + 1, startSec + count + 1)
+  }
+  const names = []
+  for (let i = 0; i < count; i++) {
+    const n = `${stem}.bak-v${i}`
+    await writeFile(join(root, n), `backup-${i}`)
+    await utimes(join(root, n), startSec + i, startSec + i)
+    names.push(n)
+  }
+  return names
 }
 
 const base = join(tmpdir(), 'dsh-turn-cleanup-test')
@@ -134,7 +164,7 @@ await scenario('3 反例 交付物 .xlsx', {
 })
 
 // 4 存量反例
-await scenario('4 反例 84 个存量 probe-*', {
+await scenario('4 反例 存量 probe-*', {
   root: base + '/s4',
   setup: async () => {
     await mkdir(join(base, 's4'), { recursive: true })
@@ -172,6 +202,154 @@ await scenario('6 子会话 subagent', {
   await ctx.emitSerial('agent/turn-stopping', { agent, turn: 1, signal: new AbortController().signal })
   check('7 禁用 enabled:false · steer', steered.length === 0, `steers=${steered.length}`)
   check('7 禁用 · 无 listener 注册', log.some(([lvl, m]) => lvl === 'info' && m.includes('disabled')), 'disabled log')
+}
+
+// 8 备份 steer 模式：6 份备份，keep=3 → 只报最旧 3 份，一个都不删
+{
+  const root = base + '/s8'
+  const names = await makeFamily(root, 'cordis.patch.yml', 6)
+  const r = await scenario('8 备份 steer 6 份 keep=3', {
+    root,
+    // 本轮碰过原件（写它），家族才会被纳入
+    recorded: ['cordis.patch.yml'],
+    expectSteer: true,
+    expectFiles: names,
+    config: { backupRetention: { keep: 3 } }
+  })
+  const text = r.steered[0]?.content[0].text ?? ''
+  const listed = (text.match(/\.bak-v\d/g) ?? []).length
+  check('8 备份 · 只列超量 3 份', listed === 3, `listed=${listed}`)
+  check('8 备份 · 文案含保留份数', text.includes('最近 3 份'), text.split('\n')[0] ?? '')
+  check('8 备份 · 最新的没被列进清单', !text.includes('bak-v5') && !text.includes('bak-v4') && !text.includes('bak-v3'), 'excess only')
+}
+
+// 9 备份 prune 模式：6 份 keep=3 → 删掉最旧 3 份，留最新 3 份 + 原件
+{
+  const root = base + '/s9'
+  const names = await makeFamily(root, 'cordis.patch.yml', 6)
+  const r = await scenario('9 备份 prune 6 份 keep=3', {
+    root,
+    recorded: ['cordis.patch.yml'],
+    expectSteer: false, // 全删干净，无残留 → 不 steer
+    config: { backupRetention: { keep: 3, mode: 'prune' } }
+  })
+  const alive = []
+  for (const n of names) if (await exists(join(root, n))) alive.push(n)
+  check('9 备份 prune · 只剩最新 3 份', alive.length === 3, `alive=${alive.join(',')}`)
+  check('9 备份 prune · 留下的正好是 v5/v4/v3', alive.sort().join(',') === 'cordis.patch.yml.bak-v3,cordis.patch.yml.bak-v4,cordis.patch.yml.bak-v5', alive.join(','))
+  check('9 备份 prune · 原件还在', await exists(join(root, 'cordis.patch.yml')), 'original')
+  check('9 备份 prune · 无 steer', r.steers === 0, `steers=${r.steers}`)
+}
+
+// 10 备份 prune + 原件缺失 → 备份保留逻辑整族不管，一条都不删
+// 注意：本轮写过的 .bak-* 本身仍会被通道 2 当临时件报出来（模式命中），
+// 所以这里断言的是「备份段不出现、一份都不删」，不是「完全不 steer」。
+{
+  const root = base + '/s10'
+  const names = await makeFamily(root, 'gone.txt', 6, { withOriginal: false })
+  // 本轮确实碰过这个家族的备份（例如模型自己又存了一份），但原件早已不在
+  const r = await scenario('10 prune 原件缺失 6 份 keep=3', {
+    root,
+    recorded: ['gone.txt.bak-v0'],
+    expectSteer: true, // 通道 2 把 .bak-v0 当临时件报出，这是预期行为
+    config: { backupRetention: { keep: 3, mode: 'prune' } }
+  })
+  const text = r.steered[0]?.content[0].text ?? ''
+  const alive = []
+  for (const n of names) if (await exists(join(root, n))) alive.push(n)
+  check('10 原件缺失 · 一份都没删', alive.length === 6, `alive=${alive.length}/6`)
+  check('10 原件缺失 · 备份段不出现（无参照物不催删）', !text.includes('备份超量'), text.slice(0, 40))
+}
+
+// 11 备份 prune + 符号链接 → 跳过，不跟链
+// Windows 非管理员默认不能建 file symlink（EPERM），这种情况下明确标 SKIP，
+// 不把「建不出链接」伪装成「守卫通过」。
+{
+  const root = base + '/s11'
+  await mkdir(root, { recursive: true })
+  await writeFile(join(root, 'real.txt'), 'real')
+  await utimes(join(root, 'real.txt'), 1700000100, 1700000100)
+  const target = join(root, 'link-target.txt')
+  await writeFile(target, 'outside')
+
+  let canSymlink = true
+  try {
+    await symlink(target, join(root, 'probe-link'))
+    await rm(join(root, 'probe-link'), { force: true })
+  } catch {
+    canSymlink = false
+  }
+
+  if (!canSymlink) {
+    check('11 符号链接 · 跳过（本机不能建 file symlink）', true, 'SKIP: EPERM without admin/developer mode')
+  } else {
+    // 造 4 个备份，最旧两个是指向真实文件的符号链接 —— 应当被 lstat 守卫挡住
+    for (let i = 0; i < 4; i++) {
+      const p = join(root, `real.txt.bak-v${i}`)
+      if (i < 2) await symlink(target, p)
+      else await writeFile(p, `b${i}`)
+      try { await utimes(p, 1700000000 + i, 1700000000 + i) } catch {}
+    }
+    await scenario('11 prune 符号链接跳过', {
+      root,
+      recorded: ['real.txt'],
+      expectSteer: false,
+      config: { backupRetention: { keep: 2, mode: 'prune' } }
+    })
+    const alive = []
+    for (let i = 0; i < 4; i++) if (await exists(join(root, `real.txt.bak-v${i}`))) alive.push(i)
+    check('11 符号链接 · 未被删（仍在）', alive.length === 4, `alive=${alive.join(',')}`)
+    check('11 符号链接 · 链接目标未受影响', await exists(target), 'target alive')
+  }
+}
+
+// 12 keep 边界：正好 3 份 → 不报、不删
+{
+  const root = base + '/s12'
+  const names = await makeFamily(root, 'exact.yml', 3)
+  await scenario('12 边界 正好 keep=3 份', {
+    root,
+    recorded: ['exact.yml'],
+    expectSteer: false,
+    expectFiles: names,
+    config: { backupRetention: { keep: 3, mode: 'prune' } }
+  })
+  const alive = []
+  for (const n of names) if (await exists(join(root, n))) alive.push(n)
+  check('12 边界 · 3 份全留', alive.length === 3, `alive=${alive.length}/3`)
+}
+
+// 13 与临时件共存：备份 + probe-* 同时命中，一段 steer 覆盖两件事
+{
+  const root = base + '/s13'
+  const names = await makeFamily(root, 'cfg.yml', 5)
+  const r = await scenario('13 共存 备份 + 临时件', {
+    root,
+    files: ['probe-z.mjs'],
+    recorded: ['cfg.yml'],
+    expectSteer: true,
+    config: { backupRetention: { keep: 3 } }
+  })
+  const text = r.steered[0]?.content[0].text ?? ''
+  check('13 共存 · 文案含临时件段', text.includes('收尾前清场'), 'temp section')
+  check('13 共存 · 文案含备份段', text.includes('备份超量'), 'backup section')
+  check('13 共存 · 备份一份没删', (await Promise.all(names.map((n) => exists(join(root, n))))) .filter(Boolean).length === 5, 'all backups alive')
+}
+
+// 14 backupRetention.enabled:false → 备份完全不参与
+{
+  const root = base + '/s14'
+  const names = await makeFamily(root, 'off.yml', 6)
+  await scenario('14 backupRetention 关闭', {
+    root,
+    recorded: ['off.yml'],
+    expectSteer: false,
+    expectFiles: names,
+    config: { backupRetention: { enabled: false, keep: 3, mode: 'prune' } }
+  })
+  const alive = []
+  for (const n of names) if (await exists(join(root, n))) alive.push(n)
+  check('14 关闭 · 6 份全留', alive.length === 6, `alive=${alive.length}/6`)
 }
 
 console.log('\n=== 日志样本 ===')

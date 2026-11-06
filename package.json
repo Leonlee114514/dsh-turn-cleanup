@@ -1,7 +1,7 @@
 {
   "name": "dsh-turn-cleanup",
-  "version": "0.1.0",
-  "description": "turn 结束时检查本轮 agent 留下的临时文件（.agent-tmp/ 约定目录 + 本 turn 写入追踪），非空则 steer 模型再走一步清场。",
+  "version": "0.2.0",
+  "description": "turn 结束时检查本轮 agent 留下的临时文件（.agent-tmp/ 约定目录 + 本 turn 写入追踪）与超量备份（同一原件的 .bak 只留最近 N 份），非空则 steer 模型再走一步清场。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

@@ -31,3 +31,9 @@
         maxLogPaths: 10
         maxSteerPaths: 20
         logFile: ""
+        backupRetention:
+          enabled: true
+          keep: 3
+          mode: steer
+          requireOriginalPresent: true
+          maxPrunePerTurn: 50

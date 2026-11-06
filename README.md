@@ -43,7 +43,7 @@ if (turnEnds && this.inbox.nextStep.length === 0) break;
 
 ---
 
-## 检出范围：两个通道，三重条件
+## 检出范围：三个通道，各自独立判定
 
 ### 通道 1 — 约定目录（主机制，零误伤）
 
@@ -66,10 +66,41 @@ if (turnEnds && this.inbox.nextStep.length === 0) break;
 这条不是洁癖。一个用了几个月的工作区里躺着几十个 `probe-*`，扫全量的插件第一天就会被
 关掉。
 
+### 通道 3 — 备份保留（同一原件的 `.bak` 家族只留最近 N 份）
+
+模型干活爱留备份当回滚点，任务一长就堆成山。本机 profile 目录实测躺着 35 个
+`*.bak-*`，同一个 `cordis.patch.yml` 就有 28 份。这条按「同目录 + 同原件名」把备份聚成
+家族，只留最近 `keep` 份（默认 3），其余列出来。
+
+家族键只认 `.bak` 及其后的 `-` / `.` 分隔：`x` / `x.bak` / `x.bak-<后缀>` / `x.bak.<后缀>`
+都算同一家族，`x.bakfoo` 不算。**不假定时间戳格式** —— 实测命名五花八门
+（`.bak-0926`、`.bak-1793445543005`、`.bak-autodetect-20261102-080912`、`.bak-purge`、
+裸 `.bak`），任何「按日期正则解析」的做法都会漏掉一半。
+
+只处理**本轮碰过的家族**：seeds 来自 `fs/write-intent` 记录 + `.agent-tmp/` 扫描结果，
+推不出原件名的直接跳过。每个目录只 `readdir` 一次，不扫全盘。
+
+两种模式：
+
+- `mode: steer`（默认）：只把超量的列进清单，由模型判断并执行删除。和通道 1/2 一样，插件不动手。
+- `mode: prune`：插件自己删。删的虽然是副本，但不可逆，所以必须显式选择。
+
+`prune` 的四道闸：
+
+1. **原件必须仍在**。原件没了，那几份备份可能是唯一副本 —— 整族跳过，一条都不删。
+2. **`lstat` 是普通文件、不是符号链接**。不跟链，避免删到链外的真文件。
+3. **不在保护段**（`.git` / `node_modules` / `.tmp-sessions` / `out`），且在工作区之内。
+4. **每轮删除条数上限**（`maxPrunePerTurn`，默认 50）。
+
+刻意**不做**「备份比原件新就不删」：备份是某个历史状态的副本，原件比它新才是常态；
+反过来原件比备份旧往往意味着模型反复备份却没改原件 —— 那正是要清的重复副本。而且
+删的永远是最旧的那几份，最新 `keep` 份一律不动，价值损失有上界。
+
 ### 明确不做
 
-- **不删任何文件** —— 只 steer。删不删、留不留由模型判断（交付物、用户文件、`.tmp-sessions`、
-  `.git`、`node_modules`、`out/` 一律不碰）。
+- **通道 1 / 2 永远不删任何文件** —— 只 steer，删不删、留不留由模型判断（交付物、用户文件、
+  `.tmp-sessions`、`.git`、`node_modules`、`out/` 一律不碰）。只有通道 3 的 `prune` 模式会删，
+  且只删备份副本，四道闸见上。
 - **不做 `git status` 兜底** —— 大仓库慢，且存量未跟踪文件极多，容易误判。
 - **子会话整段跳过** —— `origin === "subagent"` 或 `delegationDepth > 0` 时直接 return，它们的
   cwd 可能是别人的工作区。
@@ -97,6 +128,22 @@ if (turnEnds && this.inbox.nextStep.length === 0) break;
 ```
 
 超过 `maxSteerPaths` 时追加 `- …还有 N 个`。
+
+临时件与超量备份同时存在时，文案分两段，中间空一行：
+
+```
+收尾前清场：这些是本轮你留下的临时文件——
+- .agent-tmp/scratch-run.log
+删掉它们；要留的逐条说明理由并挪到明确位置。交付物、用户文件、.tmp-sessions、.git 不要动。
+
+备份超量：同一原件的 .bak 只保留最近 3 份，这些是多余的——
+- cfg-demo.yml.bak-r1
+- cfg-demo.yml.bak-r2
+删掉它们；要留的先挪到明确位置并说明理由。不要动原件本身，也不要动最近 3 份。
+```
+
+分两段而不是混在一起，是因为两件事的约束不同：临时件没有「保留几份」的概念，备份有；
+而备份段必须显式提醒「不要动原件、不要动最近 N 份」，否则模型容易把整族一起删掉。
 
 ---
 
@@ -187,6 +234,11 @@ schema（本插件故意不导出，避免 schemastery 依赖）。若显示 `in
 | `maxLogPaths` | `10` | 日志里最多列几条 |
 | `maxSteerPaths` | `20` | steer 文案里最多列几条 |
 | `logFile` | `""` | 落盘旁路；相对 cwd 或绝对路径 |
+| `backupRetention.enabled` | `true` | `false` → 整个通道 3 关闭 |
+| `backupRetention.keep` | `3` | 同一原件保留几份，1..20 |
+| `backupRetention.mode` | `steer` | `steer` 只列清单；`prune` 插件自己删 |
+| `backupRetention.requireOriginalPresent` | `true` | 原件不在的家族整族跳过 |
+| `backupRetention.maxPrunePerTurn` | `50` | `prune` 模式每轮删除上限 |
 
 ---
 
@@ -205,7 +257,7 @@ schema（本插件故意不导出，避免 schemastery 依赖）。若显示 `in
 
 ## 实测
 
-在一台真实 DSH 桌面上跑过七项验收，全部通过：
+在一台真实 DSH 桌面上跑过九项验收，全部通过：
 
 | # | 项 | 结果 |
 | --- | --- | --- |
@@ -216,17 +268,19 @@ schema（本插件故意不导出，避免 schemastery 依赖）。若显示 `in
 | 5 | 防抖只 steer 一次 | ✅ 4 文件全不删，第二趟 `tripped=true` 直接 return |
 | 6 | subagent 跳过 | ✅ subagent 写文件有 `wi` 行，gate 行数 = 0 |
 | 7 | `enabled: false` 完全失效 | ✅ 放 `.agent-tmp/` 文件结束 turn，无任何 steer |
+| 8 | 备份 steer 模式 | ✅ turn 8 拦到 `cfg-demo.yml.bak-r1` / `-r2`，`backups=2 keep=3`，r3–r5 未被列 |
+| 9 | 备份 prune 模式 | ✅ 5 份备份 → 删 p1/p2、剩 p3/p4/p5，原件保留，`deleted=2 keep=3` |
 
 单元测试（假 ctx 模拟 agent-loop 调用顺序，不依赖 DSH 运行时）：
 
 ```bash
-npm test        # 11/11 checks passed
+npm test        # 35/35 checks passed
 npm run verify  # syntax check + test
 ```
 
 ---
 
-## 两个真机踩到的坑
+## 四个真机踩到的坑
 
 **1. 配置归一化把裸前导点削掉**
 
@@ -243,6 +297,13 @@ npm run verify  # syntax check + test
 `recorded` 原本判 `s.turn === turn`。但插件若在本 turn 中途才 apply，没赶上 `turn/start`，
 `s.turn` 是 `undefined`，会被误判成非本 turn 而漏检。改为
 `s.turn === undefined || s.turn === turn`。
+
+**4. 「备份比原件新就不删」这条守卫写反了，且本来就不该有**
+
+`prune` 初版带一条 `plan.originalMtime < member.mtimeMs → skip`。真机一跑，5 份备份
+只删掉 1 份（`deleted=1`，实际剩 4 份）。原因是原件刚被写、mtime 最新，于是每一份
+「比原件旧」的备份都被当成「不能删」。守卫的意图（原件内容还没落进备份）根本站不住：
+备份是历史状态的副本，原件比它新才是常态。删掉后 `deleted=2`，剩 3 份 + 原件，符合预期。
 
 ---
 
