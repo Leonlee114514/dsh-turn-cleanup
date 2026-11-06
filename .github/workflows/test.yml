@@ -1,0 +1,85 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # 本插件只用 node 内建模块（fs/promises、path、crypto、os），没有运行时依赖。
+      # 所以这里不跑 npm ci —— 没有依赖可装，跑了只是浪费。
+      - name: Syntax check
+        run: |
+          set -e
+          for f in lib/*.js test/*.mjs; do
+            node --check "$f"
+          done
+
+      - name: Module loads and exports the plugin contract
+        run: |
+          node --input-type=module -e "
+            const m = await import('./lib/index.js');
+            for (const k of ['name', 'inject', 'apply']) {
+              if (!(k in m)) { console.error('missing export: ' + k); process.exit(1); }
+            }
+            if (m.name !== 'dsh-turn-cleanup') { console.error('bad name: ' + m.name); process.exit(1); }
+            if (!Array.isArray(m.inject)) { console.error('inject must be an array'); process.exit(1); }
+            if (typeof m.apply !== 'function') { console.error('apply must be a function'); process.exit(1); }
+            console.log('exports ok:', m.name, 'inject=' + JSON.stringify(m.inject));
+          "
+
+      # 假 ctx 模拟 agent-loop 的调用顺序，不依赖 DSH 运行时。
+      # 覆盖：正例 / 约定目录 / 交付物反例 / 存量反例 / 防抖 / 子会话 / 禁用。
+      - name: Behaviour simulation (7 acceptance cases)
+        run: node test/sim.mjs
+
+      # 插件必须能在任何 OS 上跑：路径分隔符、大小写敏感性、临时目录位置都不同。
+      - name: Manifest is well-formed
+        run: |
+          node --input-type=module -e "
+            import { readFileSync } from 'node:fs';
+            const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+            if (pkg.name !== 'dsh-turn-cleanup') { console.error('bad name'); process.exit(1); }
+            if (pkg.type !== 'module') { console.error('must be ESM'); process.exit(1); }
+            if (pkg.main !== 'lib/index.js') { console.error('bad main'); process.exit(1); }
+            if (!pkg.exports?.['.']) { console.error('missing exports[\".\"]'); process.exit(1); }
+            console.log('manifest ok:', pkg.version);
+          "
+
+  # Windows 是 DSH 桌面的主力平台，路径语义（反斜杠、盘符、大小写）跟 Linux 差得最多。
+  # 只在 ubuntu 上跑等于没验跨平台。
+  cross-platform:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Syntax check
+        shell: bash
+        run: |
+          set -e
+          for f in lib/*.js test/*.mjs; do
+            node --check "$f"
+          done
+
+      - name: Behaviour simulation (7 acceptance cases)
+        run: node test/sim.mjs

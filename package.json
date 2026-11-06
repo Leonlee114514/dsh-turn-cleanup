@@ -1,0 +1,42 @@
+{
+  "name": "dsh-turn-cleanup",
+  "version": "0.1.0",
+  "description": "turn 结束时检查本轮 agent 留下的临时文件（.agent-tmp/ 约定目录 + 本 turn 写入追踪），非空则 steer 模型再走一步清场。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cleanup",
+    "turn-stopping",
+    "agent-hygiene"
+  ],
+  "license": "MIT",
+  "author": "Leonlee114514",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Leonlee114514/dsh-turn-cleanup.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Leonlee114514/dsh-turn-cleanup/issues"
+  },
+  "homepage": "https://github.com/Leonlee114514/dsh-turn-cleanup#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "check": "node --check lib/index.js && node --check test/sim.mjs",
+    "test": "node test/sim.mjs",
+    "verify": "npm run check && npm test"
+  }
+}
