@@ -1,0 +1,152 @@
+// 面板数据通道的本地验证：用假 ctx 把 apply 跑起来，断言
+//   1) stats 账本在闸门触发时落盘
+//   2) turn/end 之后 verify 把「已清 / 仍在」算对
+//   3) 注册的 HTTP 路由按 query 返回三种形状（汇总 / 单会话 / 单 turn）
+// 不依赖 DSH 运行时，几秒跑完。
+import { mkdtemp, writeFile, mkdir, unlink, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { apply } from '../lib/index.js'
+
+const results = []
+function check(label, pass, detail) {
+  results.push({ label, pass })
+  console.log(`${pass ? 'PASS' : 'FAIL'}  ${label}${detail ? '  — ' + detail : ''}`)
+}
+
+const root = await mkdtemp(join(tmpdir(), 'tc-web-'))
+const cwd = join(root, 'ws')
+await mkdir(cwd, { recursive: true })
+const statsFile = join(root, 'logs', 'stats.json')
+const logFile = join(root, 'logs', 'cleanup.log')
+
+const listeners = new Map()
+const routes = []
+const ctx = {
+  logger: { info() {}, warn() {} },
+  on(evt, cb) {
+    if (!listeners.has(evt)) listeners.set(evt, [])
+    listeners.get(evt).push(cb)
+  },
+  effect(fn) {
+    const dispose = fn()
+    return () => dispose?.()
+  },
+  inject(services, callback) {
+    check('inject 请求了 webServer', services.includes('webServer'), services.join(','))
+    const sub = {
+      webServer: {
+        register(route) {
+          routes.push(route)
+          return () => {}
+        }
+      },
+      effect(fn) {
+        const dispose = fn()
+        return () => dispose?.()
+      }
+    }
+    const out = callback(sub)
+    return Promise.resolve(out)
+  },
+  async emitSerial(evt, payload) {
+    let out
+    for (const cb of listeners.get(evt) ?? []) out = await cb(payload)
+    return out
+  },
+  async emitWaterfall(evt, ...args) {
+    const cbs = listeners.get(evt) ?? []
+    const next = args.pop()
+    const step = async (i) => (i >= cbs.length ? next() : cbs[i](...args, () => step(i + 1)))
+    return step(0)
+  },
+  async emitPlain(evt, ...args) {
+    for (const cb of listeners.get(evt) ?? []) await cb(...args)
+  }
+}
+
+apply(ctx, { enabled: true, stats: true, statsFile, logFile, logFile2: undefined })
+await new Promise((r) => setTimeout(r, 60))
+
+check('注册了 /turn-cleanup/stats 路由', routes.length === 1 && routes[0].path === '/turn-cleanup/stats',
+  routes.map((r) => `${r.kind}:${r.path}`).join(','))
+check('路由是 exact', routes[0]?.kind === 'exact', String(routes[0]?.kind))
+
+const session = { id: 'sess-web-1', header: { cwd, origin: 'user', delegationDepth: 0 } }
+const agent = { session, status: 'running', steered: [], steer(m) { this.steered.push(m) } }
+
+await ctx.emitPlain('session/event', session, { type: 'turn/start', data: { turn: 7 } })
+
+// 本轮写了两个临时件（一个会被删，一个留着）+ 一个交付物
+const keepMe = join(cwd, 'probe-keep.mjs')
+const deleteMe = join(cwd, 'probe-gone.mjs')
+const deliverable = join(cwd, 'report.xlsx')
+for (const abs of [keepMe, deleteMe, deliverable]) {
+  await writeFile(abs, 'x')
+  await ctx.emitWaterfall('fs/write-intent', { targetKey: abs }, { agent }, () => undefined)
+}
+
+await ctx.emitSerial('agent/turn-stopping', { agent, turn: 7, signal: new AbortController().signal })
+check('闸门拦了（只报两个 probe）', agent.steered.length === 1,
+  agent.steered[0]?.content?.[0]?.text?.split('\n').slice(0, 4).join(' | '))
+check('交付物没被报', !String(agent.steered[0]?.content?.[0]?.text).includes('report.xlsx'), '')
+
+// 模型删掉一个
+await unlink(deleteMe)
+await ctx.emitPlain('session/event', session, { type: 'turn/end', data: { turn: 7 } })
+await new Promise((r) => setTimeout(r, 80))
+
+/** 调一次路由，拿 JSON。 */
+async function callRoute(url) {
+  return await new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 0,
+      headers: null,
+      body: '',
+      writeHead(code, headers) { this.statusCode = code; this.headers = headers },
+      end(chunk) { this.body += chunk ?? ''; resolve({ code: this.statusCode, headers: this.headers, json: JSON.parse(this.body || 'null') }) }
+    }
+    Promise.resolve(routes[0].handler({ url }, res)).catch(reject)
+  })
+}
+
+const all = await callRoute('/turn-cleanup/stats')
+check('汇总 gates=1', all.json.gates === 1, JSON.stringify({ gates: all.json.gates }))
+check('汇总 reported=2', all.json.reported === 2, String(all.json.reported))
+check('汇总 cleaned=1 / remaining=1', all.json.cleaned === 1 && all.json.remaining === 1,
+  `cleaned=${all.json.cleaned} remaining=${all.json.remaining}`)
+check('依从率 0.5', Math.abs((all.json.compliance ?? -1) - 0.5) < 1e-9, String(all.json.compliance))
+check('content-type 是 json', String(all.headers?.['content-type']).includes('application/json'), String(all.headers?.['content-type']))
+
+const perSession = await callRoute('/turn-cleanup/stats?scope=session&sid=sess-web-1')
+check('单会话 gates=1', perSession.json.scope === 'session' && perSession.json.gates === 1,
+  `${perSession.json.scope}/${perSession.json.gates}`)
+
+const perTurn = await callRoute('/turn-cleanup/stats?sid=sess-web-1&turn=7')
+check('单 turn 记录形状', perTurn.json !== null && perTurn.json.temps === 2 && perTurn.json.cleaned === 1,
+  JSON.stringify(perTurn.json))
+
+const missTurn = await callRoute('/turn-cleanup/stats?sid=sess-web-1&turn=99')
+check('未拦截的 turn 返回 null', missTurn.json === null, JSON.stringify(missTurn.json))
+
+const badScope = await callRoute('/turn-cleanup/stats?scope=session')
+check('session 但无 sid → 退回汇总', badScope.json.scope === 'all', badScope.json.scope)
+
+// 统计关闭时不该注册路由
+const ctx2 = {
+  logger: { info() {}, warn() {} },
+  on() {},
+  effect(fn) { fn() },
+  inject() { throw new Error('should not inject when stats=false') }
+}
+apply(ctx2, { enabled: true, stats: false })
+check('stats:false 时不碰 webServer', true, 'no inject call')
+
+await rm(root, { recursive: true, force: true })
+
+const failed = results.filter((r) => !r.pass)
+console.log(`\n${results.length - failed.length}/${results.length} checks passed`)
+if (failed.length > 0) {
+  for (const f of failed) console.log(`  FAILED: ${f.label}`)
+  process.exit(1)
+}

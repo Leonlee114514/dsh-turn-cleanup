@@ -1,11 +1,12 @@
 {
   "name": "dsh-turn-cleanup",
-  "version": "0.2.0",
-  "description": "turn 结束时检查本轮 agent 留下的临时文件（.agent-tmp/ 约定目录 + 本 turn 写入追踪）与超量备份（同一原件的 .bak 只留最近 N 份），非空则 steer 模型再走一步清场。",
+  "version": "0.3.0",
+  "description": "turn 结束时拦住本轮留下的临时文件（.agent-tmp/ 约定目录 + 本 turn 写入追踪）与超量备份（同一原件的 .bak 只留最近 N 份），非空则 steer 模型再走一步清场；附带 Web 面板统计拦截次数、已清文件数与依从率。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
+    "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
   "files": [
@@ -36,6 +37,9 @@
     "bundle": {
       "patch": "./cordis.patch.yml"
     },
+    "client": {
+      "platform": "web"
+    },
     "engines": {
       "dsh": ">=0.2.1-rc.5"
     }
@@ -44,8 +48,8 @@
     "node": ">=20"
   },
   "scripts": {
-    "check": "node --check lib/index.js && node --check test/sim.mjs",
-    "test": "node test/sim.mjs",
+    "check": "node --check lib/index.js && node --check lib/stats.js && node --check lib/client.js && node --check test/sim.mjs && node --check test/web.mjs && node --check test/client.mjs",
+    "test": "node test/sim.mjs && node test/web.mjs && node test/client.mjs",
     "verify": "npm run check && npm test"
   }
 }

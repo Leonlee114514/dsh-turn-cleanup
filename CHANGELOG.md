@@ -4,6 +4,38 @@
 每条写「为什么」而不只是「改了什么」—— 这个插件的坑大多来自 DSH 宿主的隐式约定，
 不记下来下次还会踩。
 
+## [0.3.0] - 2026-11-07
+
+加可视化：拦截了多少次、清掉多少文件、模型配不配合，光看日志得自己数。参考
+billion-context 的总览页形态，做一个「本插件干了多少活」的面板。
+
+指标口径上刻意不做「只报拦截次数」——那证明不了任何事。插件真正想说的是**模型配不配合**，
+所以每条拦截记录会在下一轮 turn 结束时回头 stat 一遍，算出 `cleaned / (cleaned + remaining)`。
+
+### Added
+
+- **`lib/stats.js` 统计账本**。每次闸门拦下记一条 `{at, sid, turn, cwd, temps[], backups[], keep, mode, pruned[], verify}`；
+  `verify` 只复核「同 sid + 同 turn 且还没复核过」的那条——跨轮补算会让更早的 turn 在模型早已清掉之后才算，
+  依从率虚高。`prune` 自己删掉的备份直接计入 `cleaned`（有日志为证，不用等下一轮）。账本上限 1000 条。
+- **`GET /turn-cleanup/stats` 只读端点**。三种 query：全局汇总、`?scope=session&sid=`、`?sid=&turn=`（单轮，`null` = 没拦过）。
+  走 `webServer.register()` 而不是 `remote.*` RPC：本插件没有 host 服务对象，一条 HTTP 路由比一套 service + RPC 契约轻得多，
+  客户端同源 `fetch` 相对路径即可，不用管 relay / 远程模式的 origin 探测。
+- **设置页面板**（`settings.section`，id `turn-cleanup`，order 32）。四张卡 + 最近拦截表 + 按会话分布表，范围可切全局/当前会话。
+- **turn 末尾徽章**（`conversation.chat.turnTail`，id `turn-cleanup-turn`，order 12）。这一轮拦了什么、清没清；没拦过不显示。
+- 配置项 `stats`（默认 `true`）与 `statsFile`（默认 `logFile` 同目录的 `turn-cleanup-stats.json`）。`stats: false` 就完全不记账、不装端点，闸门照旧。
+- `test/web.mjs`（15 项）与 `test/client.mjs`（27 项）。后者用假 `window.__ModuleLoader__` 加载真实 bundle，断言 slot 注册形状与 locale 字典——client 半的错在 Node 里跑不出来，只能靠契约测试挡。
+
+### Fixed
+
+- **`effect(() => disposer)` 会让注册立刻消失**。`webServer.register()` 返回 disposer，写成「先 register 拿 disposer，再
+  `sub.effect(() => disposer)`」时，exact 路由注册完就 404——effect 的返回值语义与「把 disposer 当返回值」重叠，注册被当场拆掉。
+  正确写法是把注册放进 effect 的 execute 内部、把清理闭包交出去（`@deepseek-ai/dsh-client-modules` 自己也是这种写法）。
+- **后补 `dsh.client` 声明不会自动生效**。`client-modules` 把「有没有 client 半」缓存在 `pkgMeta`（含缓存的 `null`），
+  只在进程启动时清一次；`internal/plugin` 只对新 fiber 重扫，HMR 重跑 `apply` 救不回来。插件在 `apply` 里自己兜底：
+  清掉本包那条 `null` 缓存、标 dirty、手动 `flush()` 一次；拿不到内部字段就安静放弃，退化成「重启 DSH 才出现面板」。
+- 假 ctx 的 `effect` 只存不执行，导致 locale 字典注册没发生（25/27）。真实 cordis 是「立即执行 execute、返回值当 disposer」，
+  假 ctx 改成同样的语义后 27/27。这条与上面那条 404 是同一个语义的两个侧面。
+
 ## [0.2.0] - 2026-11-06
 
 加通道 3：备份保留。模型干活爱留 `.bak` 当回滚点，任务一长就堆成山——本机 profile 目录

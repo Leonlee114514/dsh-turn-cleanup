@@ -71,7 +71,9 @@ async function exists(abs) {
 
 async function scenario(label, { root, setup, origin, delegationDepth, files, recorded, expectSteer, expectFiles, config = {}, steps = 1 }) {
   const ctx = makeCtx()
-  apply(ctx, { enabled: true, ...config })
+  // 默认关掉统计账本：假 ctx 没有 $DSH_HOME 概念，开着会把测试数据写进真实账本。
+  // 需要验证统计的场景显式传 stats: true + statsFile。
+  apply(ctx, { enabled: true, stats: false, ...config })
   const { agent, steered } = makeAgent(root, { origin, delegationDepth })
   if (setup) await setup()
 

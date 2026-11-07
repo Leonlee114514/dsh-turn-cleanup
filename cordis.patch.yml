@@ -31,6 +31,9 @@
         maxLogPaths: 10
         maxSteerPaths: 20
         logFile: ""
+        # 统计账本（Web 面板读它）。空 statsFile = 与 logFile 同目录。
+        stats: true
+        statsFile: ""
         backupRetention:
           enabled: true
           keep: 3

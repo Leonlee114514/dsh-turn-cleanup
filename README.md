@@ -234,6 +234,8 @@ schema（本插件故意不导出，避免 schemastery 依赖）。若显示 `in
 | `maxLogPaths` | `10` | 日志里最多列几条 |
 | `maxSteerPaths` | `20` | steer 文案里最多列几条 |
 | `logFile` | `""` | 落盘旁路；相对 cwd 或绝对路径 |
+| `stats` | `true` | `false` → 不记账、不装 `/turn-cleanup/stats` 端点 |
+| `statsFile` | `""` | 账本路径；留空 = `logFile` 同目录的 `turn-cleanup-stats.json` |
 | `backupRetention.enabled` | `true` | `false` → 整个通道 3 关闭 |
 | `backupRetention.keep` | `3` | 同一原件保留几份，1..20 |
 | `backupRetention.mode` | `steer` | `steer` 只列清单；`prune` 插件自己删 |
@@ -255,9 +257,47 @@ schema（本插件故意不导出，避免 schemastery 依赖）。若显示 `in
 
 ---
 
+## 可视化面板
+
+拦截了多少次、清掉了多少文件、模型配不配合——光看日志要自己数。插件带一个 Web 面板：
+
+- **设置页 → 收尾清场**：四张卡（拦截次数 / 报出文件数 / 已清文件数 / 依从率），
+  下面是最近拦截记录与按会话的分布表；范围可切「全部会话 / 当前会话」。
+- **每个 turn 末尾一行徽章**：这一轮拦了什么、清没清。没拦过就不显示。
+
+### 依从率是怎么算的
+
+不靠猜。闸门拦下时把清单记进账本（`statsFile`），**下一轮 turn 结束**再回头 stat 一遍那些路径：
+
+- 文件没了 → 算 `cleaned`
+- 文件还在 → 算 `remaining`
+- `compliance = cleaned / (cleaned + remaining)`
+
+只复核「同 sid + 同 turn 且还没复核过」的那条记录。跨轮补算会让更早的 turn 在模型早已
+清掉之后才算，依从率虚高。
+
+`prune` 模式自己删掉的备份直接计入 `cleaned`（有日志为证，不用等下一轮）。
+
+### 数据通道
+
+Host 半注册一个只读 JSON 端点，客户端同源 `fetch` 相对路径：
+
+```
+GET /turn-cleanup/stats                       # 全局汇总
+GET /turn-cleanup/stats?scope=session&sid=…   # 单会话汇总
+GET /turn-cleanup/stats?sid=…&turn=…          # 单轮记录，null = 这轮没拦过
+```
+
+为什么不走 `remote.*` RPC：本插件没有 host 服务对象，注册一条 HTTP 路由比造一套
+service + RPC 契约轻得多，也不用管 relay / 远程模式的 origin 探测。
+
+`stats: false` 就完全不记账、不装端点，闸门本身照旧。
+
+---
+
 ## 实测
 
-在一台真实 DSH 桌面上跑过九项验收，全部通过：
+在一台真实 DSH 桌面上跑过十一项验收，全部通过：
 
 | # | 项 | 结果 |
 | --- | --- | --- |
@@ -270,17 +310,23 @@ schema（本插件故意不导出，避免 schemastery 依赖）。若显示 `in
 | 7 | `enabled: false` 完全失效 | ✅ 放 `.agent-tmp/` 文件结束 turn，无任何 steer |
 | 8 | 备份 steer 模式 | ✅ turn 8 拦到 `cfg-demo.yml.bak-r1` / `-r2`，`backups=2 keep=3`，r3–r5 未被列 |
 | 9 | 备份 prune 模式 | ✅ 5 份备份 → 删 p1/p2、剩 p3/p4/p5，原件保留，`deleted=2 keep=3` |
+| 10 | 统计端点可访问 | ✅ `GET /turn-cleanup/stats` → 200，空账本返回 `gates: 0` |
+| 11 | client bundle 进 boot graph | ✅ 日志 `client entry recovered url=plugins/??dsh-turn-cleanup/client.js&rev=…`，该 URL 取到 15957B 可解析 bundle |
 
 单元测试（假 ctx 模拟 agent-loop 调用顺序，不依赖 DSH 运行时）：
 
 ```bash
-npm test        # 35/35 checks passed
+npm test        # 35 + 15 + 27 = 77 checks passed
 npm run verify  # syntax check + test
 ```
 
+三份测试各管一段：`test/sim.mjs` 驱动闸门与三个通道（35 项）、`test/web.mjs` 驱动
+StatsStore 与 `/turn-cleanup/stats` 端点（15 项）、`test/client.mjs` 用假 `window.__ModuleLoader__`
+加载真实 client bundle、断言 slot 注册形状与 locale 字典（27 项）。
+
 ---
 
-## 四个真机踩到的坑
+## 六个真机踩到的坑
 
 **1. 配置归一化把裸前导点削掉**
 
@@ -304,6 +350,32 @@ npm run verify  # syntax check + test
 只删掉 1 份（`deleted=1`，实际剩 4 份）。原因是原件刚被写、mtime 最新，于是每一份
 「比原件旧」的备份都被当成「不能删」。守卫的意图（原件内容还没落进备份）根本站不住：
 备份是历史状态的副本，原件比它新才是常态。删掉后 `deleted=2`，剩 3 份 + 原件，符合预期。
+
+**5. `effect(() => disposer)` 会让注册立刻消失**
+
+`webServer.register()` 返回 disposer。写成「先 register 拿到 disposer，再
+`sub.effect(() => disposer)`」时，exact 路由注册完就 404——effect 的返回值语义与
+「把 disposer 当返回值」重叠，注册被当场拆掉。正确写法是把注册放进 effect 的 execute
+内部、把清理闭包交出去：
+
+```js
+sub.effect(() => {
+  const off = sub.webServer.register({ kind: 'exact', path: '/turn-cleanup/stats', handler })
+  return () => off()
+}, 'dsh-turn-cleanup: stats route')
+```
+
+`@deepseek-ai/dsh-client-modules` 自己也是这种写法。
+
+**6. 后补 `dsh.client` 声明不会自动生效**
+
+`client-modules` 把「这个包有没有 client 半」的结论缓存在 `pkgMeta` 里（含缓存的 `null`），
+而这份缓存只在进程启动时清一次；`internal/plugin` 只对新 fiber 重扫，HMR 重跑 `apply`
+救不回来。先装插件、后补 `dsh.client` 的情况会永久记成「没有 client 半」。
+
+插件在 `apply` 里自己做一次兜底：清掉**本包自己**那条 `null` 缓存、标 dirty、手动
+`flush()` 一次。日志里会有一行 `client entry recovered url=…`。拿不到内部字段就安静放弃，
+退化成「重启 DSH 才出现面板」——那本来也是正常安装路径。
 
 ---
 
