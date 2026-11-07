@@ -31,6 +31,9 @@
         maxLogPaths: 10
         maxSteerPaths: 20
         logFile: ""
+        # 交付方式：followup = 另开一轮清场（默认，交付汇报不会被折叠）
+        #           steer    = 同轮多跑一步（闸门更硬，但汇报会被折进「过程」）
+        steerMode: followup
         # 统计账本（Web 面板读它）。空 statsFile = 与 logFile 同目录。
         stats: true
         statsFile: ""

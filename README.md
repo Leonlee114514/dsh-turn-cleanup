@@ -234,6 +234,7 @@ schema（本插件故意不导出，避免 schemastery 依赖）。若显示 `in
 | `maxLogPaths` | `10` | 日志里最多列几条 |
 | `maxSteerPaths` | `20` | steer 文案里最多列几条 |
 | `logFile` | `""` | 落盘旁路；相对 cwd 或绝对路径 |
+| `steerMode` | `followup` | 交付方式：`followup` 另开一轮；`steer` 同轮多跑一步（见下） |
 | `stats` | `true` | `false` → 不记账、不装 `/turn-cleanup/stats` 端点 |
 | `statsFile` | `""` | 账本路径；留空 = `logFile` 同目录的 `turn-cleanup-stats.json` |
 | `backupRetention.enabled` | `true` | `false` → 整个通道 3 关闭 |
@@ -244,14 +245,37 @@ schema（本插件故意不导出，避免 schemastery 依赖）。若显示 `in
 
 ---
 
+## 交付方式：另开一轮，还是同轮多跑一步
+
+`agent/turn-stopping` 有两种让模型继续的写法，代价不一样：
+
+| | `followup`（默认） | `steer` |
+| --- | --- | --- |
+| 清单排进 | `next-turn`，另开一轮 | `next-step`，同轮多跑一步 |
+| 本轮 | 正常结束，交付汇报照常显示 | 汇报被这一步顶掉 |
+| 闸门硬度 | 模型仍可不理，但下一轮开头就撞见 | 不处理这一轮结束不了 |
+| 依从率复核点 | `turn + 1` 的 turn/end | 本轮的 turn/end |
+
+**为什么默认 followup**：chat UI 按 turn 折叠，`latestAnswer(turn)` 取的是
+**turn 内最后一个 step 的 assistant 文本**（`@deepseek-ai/dsh-client-ui-chat/lib/client.js:10718`）。
+steer 那一步成为最后一步，于是真正的交付汇报被折进「过程」区，屏幕上只剩清场汇报。
+followup 把清单排到下一轮，本轮最后一步仍是汇报本身，折叠不会发生；`kick()` 的
+`while (await this.turn())` 会在队列有 next-turn 时自动接着跑，所以清场照样执行。
+
+要更硬的闸门就把 `steerMode` 设成 `steer`，接受汇报被折叠的代价。
+
+---
+
 ## 日志
 
 `ctx.logger.info` 只写 Electron 主进程 stdout，进程一关就没了。要事后取证就配 `logFile`，
 每次拦截追加一行：
 
 ```
-2026-11-06T03:43:31.838Z steer session=<id> turn=2 cwd=<cwd> files=2 paths=[.agent-tmp/scratch-run.log, probe-yyy.mjs]
+2026-11-07T03:43:31.838Z followup session=<id> turn=2 cwd=<cwd> files=2 paths=[.agent-tmp/scratch-run.log, probe-yyy.mjs]
 ```
+
+行首是实际交付方式（`followup` / `steer`），`prune` 模式自己删东西时另有一行 `prune …`。
 
 写日志失败一律静默——落盘是取证旁路，不能因为路径不可写而拖住 turn 边界。
 
@@ -316,7 +340,7 @@ service + RPC 契约轻得多，也不用管 relay / 远程模式的 origin 探�
 单元测试（假 ctx 模拟 agent-loop 调用顺序，不依赖 DSH 运行时）：
 
 ```bash
-npm test        # 35 + 15 + 27 = 77 checks passed
+npm test        # 39 + 17 + 27 = 83 checks passed
 npm run verify  # syntax check + test
 ```
 
@@ -326,7 +350,7 @@ StatsStore 与 `/turn-cleanup/stats` 端点（15 项）、`test/client.mjs` 用�
 
 ---
 
-## 六个真机踩到的坑
+## 七个真机踩到的坑
 
 **1. 配置归一化把裸前导点削掉**
 
@@ -376,6 +400,17 @@ sub.effect(() => {
 插件在 `apply` 里自己做一次兜底：清掉**本包自己**那条 `null` 缓存、标 dirty、手动
 `flush()` 一次。日志里会有一行 `client entry recovered url=…`。拿不到内部字段就安静放弃，
 退化成「重启 DSH 才出现面板」——那本来也是正常安装路径。
+
+**7. steer 会把交付汇报折进「过程」**
+
+`turn-stopping` 里 `agent.steer()` 让同一轮多跑一步，那一步成了 turn 的最后一步。而
+chat UI 的 `latestAnswer(turn)` 取的是 **turn 内最后一个 step 的 assistant 文本**
+（`@deepseek-ai/dsh-client-ui-chat/lib/client.js:10718`），于是真正的交付汇报被判成
+「过程」折叠起来，屏幕上只剩清场汇报。
+
+改成交付走 `agent.followup()`：清单排进 `next-turn`，本轮正常收尾、汇报仍是最后一步；
+`kick()` 的 `while (await this.turn())` 会接着跑下一轮执行清场。默认就是这条路，
+`steerMode: steer` 保留硬闸门。
 
 ---
 

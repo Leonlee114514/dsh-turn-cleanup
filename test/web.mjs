@@ -110,6 +110,16 @@ async function callRoute(url) {
   })
 }
 
+// 默认交付方式是 followup：清单排进下一轮，本轮 turn/end 时模型还没动手，
+// 所以复核点落在 turn + 1。按真实时序先确认「本轮结束不复核」。
+const early = await callRoute('/turn-cleanup/stats')
+check('followup · 本轮结束不复核', early.json.verifiedEvents === 0 && early.json.cleaned === 0,
+  `verified=${early.json.verifiedEvents} cleaned=${early.json.cleaned}`)
+
+// 下一轮（turn 8）结束才是「已经动过手」。
+await ctx.emitPlain('session/event', session, { type: 'turn/end', data: { turn: 8 } })
+await new Promise((r) => setTimeout(r, 80))
+
 const all = await callRoute('/turn-cleanup/stats')
 check('汇总 gates=1', all.json.gates === 1, JSON.stringify({ gates: all.json.gates }))
 check('汇总 reported=2', all.json.reported === 2, String(all.json.reported))
@@ -125,6 +135,8 @@ check('单会话 gates=1', perSession.json.scope === 'session' && perSession.jso
 const perTurn = await callRoute('/turn-cleanup/stats?sid=sess-web-1&turn=7')
 check('单 turn 记录形状', perTurn.json !== null && perTurn.json.temps === 2 && perTurn.json.cleaned === 1,
   JSON.stringify(perTurn.json))
+check('单 turn 记录带复核时机', perTurn.json?.verifyAtTurn === 8 && perTurn.json?.steerMode === 'followup',
+  `verifyAtTurn=${perTurn.json?.verifyAtTurn} steerMode=${perTurn.json?.steerMode}`)
 
 const missTurn = await callRoute('/turn-cleanup/stats?sid=sess-web-1&turn=99')
 check('未拦截的 turn 返回 null', missTurn.json === null, JSON.stringify(missTurn.json))

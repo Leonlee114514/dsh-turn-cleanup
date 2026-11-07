@@ -4,6 +4,36 @@
 每条写「为什么」而不只是「改了什么」—— 这个插件的坑大多来自 DSH 宿主的隐式约定，
 不记下来下次还会踩。
 
+## [0.3.1] - 2026-11-07
+
+修一个只有真机用起来才会暴露的问题：闸门把交付汇报顶掉了。
+
+`agent.steer()` 让同一轮多跑一步，那一步成了 turn 的最后一步；而 chat UI 的
+`latestAnswer(turn)` 取的是 turn 内**最后一个 step** 的 assistant 文本
+（`@deepseek-ai/dsh-client-ui-chat/lib/client.js:10718`），于是真正的交付汇报被判成
+「过程」折叠起来，屏幕上只剩清场汇报。功能没错，但用户看到的东西反了。
+
+### Changed
+
+- **默认交付方式改 `followup`**。`agent.followup()` 把清单排进 `next-turn`：本轮正常收尾、
+  汇报仍是最后一步，紧接着 `kick()` 的 `while (await this.turn())` 自动开一轮执行清场。
+  跨 turn 折叠互不干扰，闸门硬度只降一点（模型仍可不理，但下一轮开头就撞见）。
+- 新增配置 `steerMode`（`followup` | `steer`，默认 `followup`）。要「不处理这一轮就结束不了」
+  的硬闸门就把 `steerMode` 设成 `steer`，接受汇报被折叠的代价。老 agent 没有 `followup()`
+  时自动退回 `steer`，不会崩。
+- 日志行首从固定的 `steer ` 改成实际交付方式（`followup ` / `steer `），一眼能分出是哪条路。
+
+### Fixed
+
+- **依从率复核时机跟着交付方式走**。followup 模式下清单要等下一轮才被执行，若仍在
+  `turn/end` 按本轮复核，会读到「全都还在」的假数字，把依从率压成 0。账本新增
+  `verifyAtTurn`（followup = `turn + 1`）与 `steerMode` 两个字段，`verify()` 按
+  `verifyAtTurn` 匹配；`turnRecord` / `summary.recent` 一并透出。
+- `test/web.mjs` 按真实时序重写复核段：turn 7 被拦 → turn 7 结束断言「还没复核」→
+  turn 8 结束才算 cleaned/remaining。另加一条断言 `verifyAtTurn === 8 && steerMode === 'followup'`。
+- `test/sim.mjs` 的假 agent 补上 `followup()` 并记录走的哪条路；新增场景 15（显式
+  `steerMode: 'steer'`）与 16（无 `followup()` 时退回 `steer`）。39 项。
+
 ## [0.3.0] - 2026-11-07
 
 加可视化：拦截了多少次、清掉多少文件、模型配不配合，光看日志得自己数。参考

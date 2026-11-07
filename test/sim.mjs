@@ -41,17 +41,26 @@ function makeCtx() {
   }
 }
 
-function makeAgent(root, { origin = 'user', delegationDepth = 0, id = 'sess-1' } = {}) {
+function makeAgent(root, { origin = 'user', delegationDepth = 0, id = 'sess-1', noFollowup = false } = {}) {
   const steered = []
+  const modes = []
   const session = { id, header: { cwd: root, origin, delegationDepth } }
   const agent = {
     session,
     status: 'running',
     steer(msg) {
+      modes.push('steer')
       steered.push(msg)
     }
   }
-  return { agent, steered }
+  // 老版本 agent 没有 followup；插件应当退回 steer 而不是崩。
+  if (!noFollowup) {
+    agent.followup = (msg) => {
+      modes.push('followup')
+      steered.push(msg)
+    }
+  }
+  return { agent, steered, modes }
 }
 
 const results = []
@@ -69,12 +78,12 @@ async function exists(abs) {
   }
 }
 
-async function scenario(label, { root, setup, origin, delegationDepth, files, recorded, expectSteer, expectFiles, config = {}, steps = 1 }) {
+async function scenario(label, { root, setup, origin, delegationDepth, files, recorded, expectSteer, expectFiles, expectMode, noFollowup, config = {}, steps = 1 }) {
   const ctx = makeCtx()
   // 默认关掉统计账本：假 ctx 没有 $DSH_HOME 概念，开着会把测试数据写进真实账本。
   // 需要验证统计的场景显式传 stats: true + statsFile。
   apply(ctx, { enabled: true, stats: false, ...config })
-  const { agent, steered } = makeAgent(root, { origin, delegationDepth })
+  const { agent, steered, modes } = makeAgent(root, { origin, delegationDepth, noFollowup })
   if (setup) await setup()
 
   // turn 1 开始
@@ -94,7 +103,7 @@ async function scenario(label, { root, setup, origin, delegationDepth, files, re
     await ctx.emitWaterfall('fs/write-intent', { targetKey: abs }, { agent }, () => undefined)
   }
 
-  // 模拟 agent-loop 的 turn-stopping 闸门，最多允许 steps 次 steer
+  // 模拟 agent-loop 的 turn-stopping 闸门，最多允许 steps 次交付
   let steers = 0
   for (let i = 0; i < steps; i++) {
     const before = steered.length
@@ -107,6 +116,12 @@ async function scenario(label, { root, setup, origin, delegationDepth, files, re
   const passSteer = expectSteer ? steers > 0 : steers === 0
   check(label + ' · steer', passSteer, `steers=${steers}`)
 
+  // 默认交付方式是 followup（另开一轮），否则同一轮多跑一步会把交付汇报折叠掉。
+  if (expectMode !== undefined) {
+    const seen = modes[0] ?? '-'
+    check(label + ' · 交付方式', seen === expectMode, `mode=${seen}`)
+  }
+
   if (expectFiles !== undefined) {
     const alive = []
     for (const f of expectFiles) {
@@ -114,7 +129,7 @@ async function scenario(label, { root, setup, origin, delegationDepth, files, re
     }
     check(label + ' · 文件仍在（插件不删文件）', alive.length === expectFiles.length, `alive=${alive.join(',') || '-'}`)
   }
-  return { steered, steers }
+  return { steered, steers, modes }
 }
 
 /** 造一份带确定 mtime 的备份家族：mtime 越大越新。 */
@@ -366,6 +381,24 @@ await scenario('6 子会话 subagent', {
 }
 
 console.log('\n=== 日志样本 ===')
+// 15 steerMode:'steer' → 同轮多跑一步（硬闸门），文案照旧
+await scenario('15 steerMode steer', {
+  root: base + '/s15',
+  files: ['probe-mode.mjs'],
+  expectSteer: true,
+  expectMode: 'steer',
+  config: { steerMode: 'steer' }
+})
+
+// 16 老 agent 没有 followup() → 退回 steer，不崩
+await scenario('16 无 followup 时退回 steer', {
+  root: base + '/s16',
+  files: ['probe-legacy.mjs'],
+  noFollowup: true,
+  expectSteer: true,
+  expectMode: 'steer'
+})
+
 for (const [lvl, m] of log) console.log(`[${lvl}] ${m}`)
 
 const failed = results.filter((r) => !r.pass)
