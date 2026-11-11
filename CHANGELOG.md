@@ -4,6 +4,37 @@
 每条写「为什么」而不只是「改了什么」—— 这个插件的坑大多来自 DSH 宿主的隐式约定，
 不记下来下次还会踩。
 
+## [0.3.2] - 2026-11-12
+
+适配 DSH 0.2.2（cordis 4.1.0）。0.3.1 在 0.2.2 上**加载即失败**，闸门与面板同时消失。
+
+### Fixed
+
+- `apply` 末尾 `void ctx.inject(['webServer'], …).catch(handler)` 抛
+  `ctx.inject(...).catch is not a function`。cordis 4.1.0 的 `inject()` 返回
+  `Object.create(fiber)` 再挂一个 `then` 的 thenable，**只有 `then`，没有 `catch` / `finally`**。
+  改成 `try { const fiber = ctx.inject(...); if (typeof fiber?.then === 'function') fiber.then(undefined, onError) } catch (error) { onError(error) }`，
+  同步抛出也兜住。
+- `ensureClientEntry()` 原先把 `cm.pkgMeta instanceof Map` 当前置条件，0.2.2 删掉了这份缓存后
+  整个自救逻辑变成 no-op。现在 `pkgMeta` 只作为「老版本才需要清」的可选步骤，
+  真正的动作统一是 `dirty.add(name)` + `flush(onError)`。
+- `test/web.mjs` 的假 `ctx.inject` 返回 `undefined`，`.catch` 那行在测试里根本跑不到。
+  改成照抄 cordis 的实现形状（`Object.create(fiber)` + 只挂 `then`），并新增断言
+  「apply 在 then-only thenable 下不抛」。
+
+### Added
+
+- `test/web.mjs` 新增「0.2.2 无 pkgMeta 时仍会 dirty+flush」场景，用只有 `graph` / `dirty` /
+  `flush` 的假 `clientModules` 验证自救路径。
+- README 新增「宿主版本兼容」一节，列出实测过的 DSH/cordis 组合与依赖的钩子清单。
+
+### 为什么这个 bug 只在真机暴露
+
+本地三份测试全绿（84 项），因为假 ctx 的 `inject` 返回的是 `Promise` 或 `undefined`，
+两条都有 `.catch` 或压根不会走到。函数签名层面的不兼容，靠假实现是测不出来的——
+假实现必须照抄真实返回值的**形状**（这里就是「有 `then`、没有 `catch`」），
+否则测的是自己编的契约。
+
 ## [0.3.1] - 2026-11-07
 
 修一个只有真机用起来才会暴露的问题：闸门把交付汇报顶掉了。

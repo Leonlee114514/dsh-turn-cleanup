@@ -47,7 +47,15 @@ const ctx = {
       }
     }
     const out = callback(sub)
-    return Promise.resolve(out)
+    // cordis 4.1.0 的 ctx.inject() 返回 Object.create(fiber) 再挂一个 then 的 thenable：
+    // 有 then，没有 catch / finally。这里照抄这个形状——插件的 apply 一旦误写 .catch()，
+    // 这一行就会抛 `ctx.inject(...).catch is not a function`，测试当场红。
+    const fiber = { ok: true, value: out }
+    return Object.assign(Object.create(fiber), {
+      then(onFulfilled, onRejected) {
+        return Promise.resolve(out).then(onFulfilled, onRejected)
+      }
+    })
   },
   async emitSerial(evt, payload) {
     let out
@@ -65,9 +73,16 @@ const ctx = {
   }
 }
 
-apply(ctx, { enabled: true, stats: true, statsFile, logFile, logFile2: undefined })
+let applyError = null
+try {
+  apply(ctx, { enabled: true, stats: true, statsFile, logFile, logFile2: undefined })
+} catch (error) {
+  applyError = error
+}
 await new Promise((r) => setTimeout(r, 60))
 
+check('apply 在 then-only thenable 下不抛', applyError === null,
+  applyError ? String(applyError.message ?? applyError) : 'no throw')
 check('注册了 /turn-cleanup/stats 路由', routes.length === 1 && routes[0].path === '/turn-cleanup/stats',
   routes.map((r) => `${r.kind}:${r.path}`).join(','))
 check('路由是 exact', routes[0]?.kind === 'exact', String(routes[0]?.kind))
@@ -153,6 +168,31 @@ const ctx2 = {
 }
 apply(ctx2, { enabled: true, stats: false })
 check('stats:false 时不碰 webServer', true, 'no inject call')
+
+// 0.2.2 的 clientModules 没有 pkgMeta 缓存，只剩 dirty + flush。
+// 自救逻辑必须在这套形状下也真的 flush 一次，而不是直接 return。
+const cmState = { entries: [], dirty: new Set(), flushed: 0 }
+const ctx3 = {
+  logger: { info() {}, warn() {} },
+  on() {},
+  effect(fn) { fn() },
+  inject() { return { then() {} } },
+  get(service) {
+    if (service !== 'clientModules') return undefined
+    return {
+      graph: () => ({ entries: cmState.entries }),
+      dirty: cmState.dirty,
+      flush(onError) {
+        cmState.flushed += 1
+        cmState.entries = [{ id: 'dsh-turn-cleanup', url: 'plugins/??dsh-turn-cleanup/client.js&rev=abc123456789' }]
+        onError?.(null)
+      }
+    }
+  }
+}
+apply(ctx3, { enabled: true, stats: false })
+check('0.2.2 无 pkgMeta 时仍会 dirty+flush', cmState.flushed === 1 && cmState.dirty.has('dsh-turn-cleanup'),
+  `flushed=${cmState.flushed} dirty=${[...cmState.dirty].join(',')}`)
 
 await rm(root, { recursive: true, force: true })
 

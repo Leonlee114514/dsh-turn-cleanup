@@ -150,13 +150,11 @@ check(tail?.descriptor.id === 'turn-cleanup-turn', 'turn tail id', String(tail?.
 check(tail?.descriptor.order === 12, 'turn tail order', String(tail?.descriptor.order))
 check(typeof tail?.descriptor.inject === 'function', 'turn tail inject is a factory function')
 
-const injected = typeof tail?.descriptor.inject === 'function' ? tail.descriptor.inject('session-abc') : {}
-check(injected.sessionId === 'session-abc', 'turn tail inject forwards the session id')
+const injected = typeof tail?.descriptor.inject === 'function' ? tail.descriptor.inject() : {}
 check(typeof injected.t === 'function', 'turn tail inject forwards the translator')
-const injectedEmpty = typeof tail?.descriptor.inject === 'function' ? tail.descriptor.inject('') : {}
 check(
-  injectedEmpty.sessionId === undefined,
-  'turn tail inject omits an empty session id instead of forwarding ""'
+  !('sessionId' in injected),
+  'turn tail inject does not fabricate a session id: the slot hands it in through standardProps'
 )
 check(typeof tail?.component === 'function', 'turn tail has a component')
 

@@ -319,9 +319,29 @@ service + RPC 契约轻得多，也不用管 relay / 远程模式的 origin 探�
 
 ---
 
+## 宿主版本兼容
+
+只用 Node 内建（`node:fs/promises`、`node:crypto`、`node:path`）加几个宿主钩子，没有
+`peerDependencies`、没有 `engines.dsh`，所以不会被 profile 的兼容闸门拦下。实测跑过的宿主：
+
+| DSH | cordis | 状态 | 差异 |
+| --- | --- | --- | --- |
+| 0.2.1-rc.5 | 4.0.5 | ✅ | 基线 |
+| 0.2.2-rc.2 | 4.1.0 | ✅ 0.3.2 起 | `ctx.inject()` 变 then-only；`client-modules` 删掉 `pkgMeta` 缓存 |
+
+依赖的钩子在两个版本里语义一致：`session/event`（`turn/start` / `turn/end`）、
+`session/disposed`、`fs/write-intent` / `fs/edit-intent`、`agent/turn-stopping`、
+`agent.steer` / `agent.followup`、`ctx.webServer.register`、`ctx.effect`。
+
+0.3.2 之前的版本在 0.2.2 上会在加载时抛 `ctx.inject(...).catch is not a function`，
+插件整个不生效（闸门、面板全无）。升级宿主后如果看不到面板、也没有 `turn-cleanup.log`，
+先查这一条。
+
+---
+
 ## 实测
 
-在一台真实 DSH 桌面上跑过十一项验收，全部通过：
+在一台真实 DSH 桌面上跑过十二项验收，全部通过：
 
 | # | 项 | 结果 |
 | --- | --- | --- |
@@ -335,22 +355,24 @@ service + RPC 契约轻得多，也不用管 relay / 远程模式的 origin 探�
 | 8 | 备份 steer 模式 | ✅ turn 8 拦到 `cfg-demo.yml.bak-r1` / `-r2`，`backups=2 keep=3`，r3–r5 未被列 |
 | 9 | 备份 prune 模式 | ✅ 5 份备份 → 删 p1/p2、剩 p3/p4/p5，原件保留，`deleted=2 keep=3` |
 | 10 | 统计端点可访问 | ✅ `GET /turn-cleanup/stats` → 200，空账本返回 `gates: 0` |
-| 11 | client bundle 进 boot graph | ✅ 日志 `client entry recovered url=plugins/??dsh-turn-cleanup/client.js&rev=…`，该 URL 取到 15957B 可解析 bundle |
+| 11 | client bundle 进 boot graph | ✅ 日志 `client entry present url=plugins/??dsh-turn-cleanup/client.js&rev=4c809c380972`，该 URL 取到 15825B 可解析 bundle；`rev` 是必需参数，缺了就是 404 |
+| 12 | 0.2.2 下插件能加载 | ✅ 修掉 `ctx.inject(...).catch is not a function` 后 apply 不再抛，端点与徽章恢复 |
 
 单元测试（假 ctx 模拟 agent-loop 调用顺序，不依赖 DSH 运行时）：
 
 ```bash
-npm test        # 39 + 17 + 27 = 83 checks passed
+npm test        # 39 + 19 + 26 = 84 checks passed
 npm run verify  # syntax check + test
 ```
 
-三份测试各管一段：`test/sim.mjs` 驱动闸门与三个通道（35 项）、`test/web.mjs` 驱动
-StatsStore 与 `/turn-cleanup/stats` 端点（15 项）、`test/client.mjs` 用假 `window.__ModuleLoader__`
-加载真实 client bundle、断言 slot 注册形状与 locale 字典（27 项）。
+三份测试各管一段：`test/sim.mjs` 驱动闸门与三个通道（39 项）、`test/web.mjs` 驱动
+StatsStore 与 `/turn-cleanup/stats` 端点、以及 then-only 的 `ctx.inject` 假实现（19 项）、
+`test/client.mjs` 用假 `window.__ModuleLoader__` 加载真实 client bundle、断言 slot 注册
+形状与 locale 字典（26 项）。
 
 ---
 
-## 七个真机踩到的坑
+## 八个真机踩到的坑
 
 **1. 配置归一化把裸前导点削掉**
 
@@ -411,6 +433,41 @@ chat UI 的 `latestAnswer(turn)` 取的是 **turn 内最后一个 step 的 assis
 改成交付走 `agent.followup()`：清单排进 `next-turn`，本轮正常收尾、汇报仍是最后一步；
 `kick()` 的 `while (await this.turn())` 会接着跑下一轮执行清场。默认就是这条路，
 `steerMode: steer` 保留硬闸门。
+
+**8. `ctx.inject()` 返回的是 thenable，没有 `.catch`**
+
+cordis 4.1.0（DSH 0.2.2）的 `ctx.inject(services, callback)` 这样收尾：
+
+```js
+const fiber = new Fiber(this.ctx, config, Inject.resolve(plugin.inject), runtime, getOuterStack)
+const wrapped = Object.create(fiber)
+wrapped.then = (onFulfilled, onRejected) => fiber.await().then(onFulfilled, onRejected)
+return wrapped
+```
+
+只挂了 `then`，没有 `catch` / `finally`。写成 `void ctx.inject(...).catch(handler)` 会在
+`apply` 里同步抛 `ctx.inject(...).catch is not a function`——整个插件加载失败，闸门和面板
+一起没了，而报错信息里连插件名都不出现。0.2.1 及更早时 `inject` 返回 fiber、`.catch`
+也不存在，只是那行恰好没被跑到。
+
+正确写法（同时兜住同步抛）:
+
+```js
+try {
+  const fiber = ctx.inject(['webServer'], (sub) => { /* … */ })
+  if (typeof fiber?.then === 'function') fiber.then(undefined, onInjectError)
+} catch (error) {
+  onInjectError(error)
+}
+```
+
+`test/web.mjs` 的假 `ctx.inject` 现在照抄这个形状（`Object.create` + 只挂 `then`），
+再写 `.catch` 测试当场红。
+
+顺带一个同版本的变化：0.2.2 的 `client-modules` **删掉了 `pkgMeta` 缓存**，
+`resolveMeta()` 每次 flush 都重新读 `package.json`。所以坑 6 的兜底不再能靠
+「清掉那条 null 缓存」判断要不要干活——现在的写法是「有 `pkgMeta` 就清（老版本需要，
+新版本自然是空集合），然后统一 `dirty.add(name)` + `flush()`」。
 
 ---
 
