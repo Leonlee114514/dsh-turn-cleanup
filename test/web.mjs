@@ -143,6 +143,19 @@ check('汇总 cleaned=1 / remaining=1', all.json.cleaned === 1 && all.json.remai
 check('依从率 0.5', Math.abs((all.json.compliance ?? -1) - 0.5) < 1e-9, String(all.json.compliance))
 check('content-type 是 json', String(all.headers?.['content-type']).includes('application/json'), String(all.headers?.['content-type']))
 
+// 体积：两个 probe 各写 1 字节 'x'，一个被删一个留着。
+// reportedBytes 是「报出去的清单有多大」，cleanedBytes 才是真正释放掉的。
+check('汇总 reportedBytes=2', all.json.reportedBytes === 2, String(all.json.reportedBytes))
+check('汇总 cleanedBytes=1 / remainingBytes=1',
+  all.json.cleanedBytes === 1 && all.json.remainingBytes === 1,
+  `cleanedBytes=${all.json.cleanedBytes} remainingBytes=${all.json.remainingBytes}`)
+check('bySession 行带体积',
+  all.json.bySession?.[0]?.reportedBytes === 2 && all.json.bySession?.[0]?.cleanedBytes === 1,
+  JSON.stringify({ reportedBytes: all.json.bySession?.[0]?.reportedBytes, cleanedBytes: all.json.bySession?.[0]?.cleanedBytes }))
+check('recent 行的复核带体积',
+  all.json.recent?.[0]?.verify?.cleanedBytes === 1 && all.json.recent?.[0]?.verify?.remainingBytes === 1,
+  JSON.stringify(all.json.recent?.[0]?.verify))
+
 const perSession = await callRoute('/turn-cleanup/stats?scope=session&sid=sess-web-1')
 check('单会话 gates=1', perSession.json.scope === 'session' && perSession.json.gates === 1,
   `${perSession.json.scope}/${perSession.json.gates}`)
@@ -152,6 +165,8 @@ check('单 turn 记录形状', perTurn.json !== null && perTurn.json.temps === 2
   JSON.stringify(perTurn.json))
 check('单 turn 记录带复核时机', perTurn.json?.verifyAtTurn === 8 && perTurn.json?.steerMode === 'followup',
   `verifyAtTurn=${perTurn.json?.verifyAtTurn} steerMode=${perTurn.json?.steerMode}`)
+check('单 turn 记录带体积', perTurn.json?.cleanedBytes === 1 && perTurn.json?.remainingBytes === 1,
+  `cleanedBytes=${perTurn.json?.cleanedBytes} remainingBytes=${perTurn.json?.remainingBytes}`)
 
 const missTurn = await callRoute('/turn-cleanup/stats?sid=sess-web-1&turn=99')
 check('未拦截的 turn 返回 null', missTurn.json === null, JSON.stringify(missTurn.json))

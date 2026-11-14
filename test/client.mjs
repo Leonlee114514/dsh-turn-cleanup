@@ -163,6 +163,21 @@ check(
 )
 check(typeof tail?.component === 'function', 'turn tail has a component')
 
+// --- fmtBytes: 面板里「已释放空间」唯一的数字来源 ------------------------------
+// 0 / 负数 / NaN / 非数字都必须落到 '0 B'，不能让面板显示 NaN 或空白。
+check(typeof plugin.fmtBytes === 'function', 'exports fmtBytes for the size card')
+const bytes = plugin.fmtBytes ?? (() => '')
+check(bytes(0) === '0 B', 'fmtBytes(0) → 0 B', bytes(0))
+check(bytes(-5) === '0 B', 'fmtBytes(negative) → 0 B', bytes(-5))
+check(bytes(Number.NaN) === '0 B', 'fmtBytes(NaN) → 0 B', bytes(Number.NaN))
+check(bytes(undefined) === '0 B', 'fmtBytes(undefined) → 0 B', bytes(undefined))
+check(bytes(512) === '512 B', 'fmtBytes(512) → 512 B', bytes(512))
+check(bytes(1024) === '1.00 KB', 'fmtBytes(1024) → 1.00 KB', bytes(1024))
+check(bytes(1536) === '1.50 KB', 'fmtBytes(1536) → 1.50 KB', bytes(1536))
+check(bytes(75 * 1024) === '75.0 KB', 'fmtBytes(75 KiB) → 75.0 KB', bytes(75 * 1024))
+check(bytes(1024 * 1024) === '1.00 MB', 'fmtBytes(1 MiB) → 1.00 MB', bytes(1024 * 1024))
+check(bytes(3 * 1024 * 1024 * 1024) === '3.00 GB', 'fmtBytes(3 GiB) → 3.00 GB', bytes(3 * 1024 * 1024 * 1024))
+
 // --- render smoke: TurnBadge must return null when the turn was never gated --
 const rendered = tail.component({ turn: 7, sessionId: 'session-abc', t: (k) => `t:${k}` })
 check(rendered === null, 'TurnBadge renders nothing before the stats fetch resolves')

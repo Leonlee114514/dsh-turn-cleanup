@@ -328,11 +328,26 @@ followup 把清单排到下一轮，本轮最后一步仍是汇报本身，折�
 
 ## 可视化面板
 
-拦截了多少次、清掉了多少文件、模型配不配合——光看日志要自己数。插件带一个 Web 面板：
+拦截了多少次、清掉了多少文件、腾出了多少空间、模型配不配合——光看日志要自己数。插件带一个
+Web 面板：
 
-- **设置页 → 收尾清场**：四张卡（拦截次数 / 报出文件数 / 已清文件数 / 依从率），
+- **设置页 → 收尾清场**：五张卡（已释放空间 / 拦截次数 / 报出文件数 / 已清文件数 / 依从率），
   下面是最近拦截记录与按会话的分布表；范围可切「全部会话 / 当前会话」。
-- **每个 turn 末尾一行徽章**：这一轮拦了什么、清没清。没拦过就不显示。
+- **每个 turn 末尾一行徽章**：这一轮拦了什么、清没清、腾了多少。没拦过就不显示。
+
+### 「已释放空间」是怎么量的
+
+只量**真正消失的那部分**，不量「报出去多少」。闸门拦下时给清单里的每个条目记一次
+`stat().size`（只算普通文件，目录不计），复核时确认已消失的条目才把字节数累加进
+`cleanedBytes`——也就是「这一轮确实还给磁盘的空间」。所以：
+
+- 报出去但模型没删的，不进 `cleanedBytes`（进 `remainingBytes`）
+- `prune` 模式自己删掉的备份，大小取**删除前**的 `lstat().size`，直接计入
+- 量不到就记 0，宁可少报不猜；旧账本（v1）没有 `sizes` 字段，读出来按 0 计，不会崩
+
+体积是「打开面板的人才看」的数据，所以量它这一步放在闸门最后、只在 `stats` 打开时做，
+且一次最多量 200 个条目——`agent/turn-stopping` 是串行 await，不该为了统计在 turn 边界上
+排队几百次 `stat`。
 
 ### 依从率是怎么算的
 
@@ -356,6 +371,10 @@ GET /turn-cleanup/stats                       # 全局汇总
 GET /turn-cleanup/stats?scope=session&sid=…   # 单会话汇总
 GET /turn-cleanup/stats?sid=…&turn=…          # 单轮记录，null = 这轮没拦过
 ```
+
+汇总里有三个字节字段：`reportedBytes`（报出去的清单总共多大）、`cleanedBytes`（复核确认已
+消失的那部分，**面板的「已释放空间」就是它**）、`remainingBytes`（复核时还在的）。`bySession`
+每行带前两个，`recent[].verify` 带后两个，单轮记录带 `cleanedBytes` / `remainingBytes`。
 
 为什么不走 `remote.*` RPC：本插件没有 host 服务对象，注册一条 HTTP 路由比造一套
 service + RPC 契约轻得多，也不用管 relay / 远程模式的 origin 探测。
@@ -418,14 +437,15 @@ service + RPC 契约轻得多，也不用管 relay / 远程模式的 origin 探�
 单元测试（假 ctx 模拟 agent-loop 调用顺序，不依赖 DSH 运行时）：
 
 ```bash
-npm test        # 57 + 19 + 25 = 101 checks passed
+npm test        # 57 + 24 + 36 = 117 checks passed
 npm run verify  # syntax check + test
 ```
 
 三份测试各管一段：`test/sim.mjs` 驱动闸门与三个通道（57 项）、`test/web.mjs` 驱动
-StatsStore 与 `/turn-cleanup/stats` 端点、以及 then-only 的 `ctx.inject` 假实现（19 项）、
-`test/client.mjs` 用假 `window.__ModuleLoader__` 加载真实 client bundle、断言 slot 注册
-形状与 locale 字典（25 项）。三份都在 CI 里跑（ubuntu × node 20/22/24，加 windows/macos）。
+StatsStore 与 `/turn-cleanup/stats` 端点、体积字段、以及 then-only 的 `ctx.inject` 假实现
+（24 项）、`test/client.mjs` 用假 `window.__ModuleLoader__` 加载真实 client bundle、断言 slot
+注册形状、locale 字典与 `fmtBytes` 进位（36 项）。三份都在 CI 里跑（ubuntu × node 20/22/24，
+加 windows/macos）。
 
 `test/sim.mjs` 里有几项是**可移植性回归**，专门锁住「本机能跑、别人机器上误伤/漏报」的坑：
 正常业务文件名（`checkout.js` / `Checklist.md` / `benchmark.ts`）不误伤、带分隔符的
