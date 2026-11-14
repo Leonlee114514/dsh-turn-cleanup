@@ -42,9 +42,20 @@ jobs:
           "
 
       # 假 ctx 模拟 agent-loop 的调用顺序，不依赖 DSH 运行时。
-      # 覆盖：正例 / 约定目录 / 交付物反例 / 存量反例 / 防抖 / 子会话 / 禁用。
-      - name: Behaviour simulation (14 scenarios / 35 assertions)
+      # 覆盖：正例 / 约定目录 / 交付物反例 / 存量反例 / 防抖 / 子会话 / 禁用 /
+      #       备份保留 / 模式误伤 / protectedSegments / 三个 intent 事件 /
+      #       messageLocale / workingDirectory 与 realpath 归一。
+      - name: Behaviour simulation (26 scenarios / 57 assertions)
         run: node test/sim.mjs
+
+      # 这两个也必须在 CI 里跑：web.mjs 验的是「没有 webServer 时不许崩」，
+      # client.mjs 验的是浏览器 bundle 的契约。只在本机 npm test 里跑，
+      # 等于把最容易随宿主升级漂移的两块留在了没人看的角落。
+      - name: Web panel route (fake webServer, no socket)
+        run: node test/web.mjs
+
+      - name: Client bundle contract (fake __ModuleLoader__)
+        run: node test/client.mjs
 
       # 插件必须能在任何 OS 上跑：路径分隔符、大小写敏感性、临时目录位置都不同。
       - name: Manifest is well-formed
@@ -81,5 +92,8 @@ jobs:
             node --check "$f"
           done
 
-      - name: Behaviour simulation (14 scenarios / 35 assertions)
+      - name: Behaviour simulation (26 scenarios / 57 assertions)
         run: node test/sim.mjs
+
+      - name: Client bundle contract (fake __ModuleLoader__)
+        run: node test/client.mjs

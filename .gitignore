@@ -2,3 +2,6 @@ node_modules/
 *.log
 .DS_Store
 .agent-tmp/
+
+# 可移植性审计报告（含本机环境指纹，不随包发布）
+AUDIT-portability.md

@@ -148,13 +148,18 @@ check(typeof settings?.component === 'function', 'settings section has a compone
 check(tail !== undefined, 'registers conversation.chat.turnTail')
 check(tail?.descriptor.id === 'turn-cleanup-turn', 'turn tail id', String(tail?.descriptor.id))
 check(tail?.descriptor.order === 12, 'turn tail order', String(tail?.descriptor.order))
-check(typeof tail?.descriptor.inject === 'function', 'turn tail inject is a factory function')
-
-const injected = typeof tail?.descriptor.inject === 'function' ? tail.descriptor.inject() : {}
-check(typeof injected.t === 'function', 'turn tail inject forwards the translator')
+// renderer 的 standardKit 已经按 entry.locale 提供 locale 绑定的 `t`
+// （localeSeat(face, entry.locale)），slot 自己再 inject 一个 `t` 就是重名 prop：
+// assertNoPropOverlap 会抛 `received duplicate prop 't'`。
 check(
-  !('sessionId' in injected),
-  'turn tail inject does not fabricate a session id: the slot hands it in through standardProps'
+  tail?.descriptor.inject === undefined,
+  'turn tail does not inject `t` (standardKit already provides it)',
+  String(tail?.descriptor.inject)
+)
+check(
+  tail?.descriptor.locale === 'turn-cleanup',
+  'turn tail binds the locale namespace so standardKit can seat `t`',
+  String(tail?.descriptor.locale)
 )
 check(typeof tail?.component === 'function', 'turn tail has a component')
 

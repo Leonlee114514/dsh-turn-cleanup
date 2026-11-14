@@ -4,6 +4,91 @@
 每条写「为什么」而不只是「改了什么」—— 这个插件的坑大多来自 DSH 宿主的隐式约定，
 不记下来下次还会踩。
 
+## [0.4.0] - 2026-11-14
+
+可移植性修复：把「在作者这台机器上成立」的默认值、路径判定与安装说明，改成在别人机器上
+也成立。全部改动都由一次针对性的可移植性审计驱动，每一条都有可复现的现场。
+
+### Fixed — 会误伤别人的默认值
+
+- **默认 patterns 去掉裸 `check*` / `bench*`，改成要求分隔符的 `check-*` / `check_*` /
+  `bench-*` / `bench_*`**。匹配对象是**文件名**（不是路径），裸前缀会把正常业务代码一起吃掉：
+  `checkout.js`、`CheckoutService.ts`、`checklist.md`、`benchmark.ts` 全部命中，于是模型每写
+  一个正常文件都会被要求删除。改成带分隔符后，本来要抓的 `check-1.sh` / `bench_gpu.py` 仍命中。
+- **默认保护段去掉 `.tmp-sessions`，补上各生态通用构建目录**（`.git` / `node_modules` /
+  `out` / `dist` / `build` / `target` / `vendor` / `.venv` / `__pycache__`）。`.tmp-sessions` 是
+  作者本机的临时会话目录，宿主 326 个包里 0 命中 —— 把本机约定写进默认值，在别人机器上只是
+  一个永不适用的名字。
+- 保护段改为可配 `protectedSegments`：显式给数组**整体替换**默认值（不是追加，否则用户没法
+  取消某个默认保护段）。
+
+### Fixed — 会静默漏报的路径判定
+
+- **`insideCwd()` 现在先用 realpath 归一 cwd**。写入侧路径来自 fs 服务（`dsh-fs-local` 用
+  realpath 后的值），而 `session.header.cwd` 是会话创建时的原始字符串。两者只要差一个符号
+  链接 / Windows 短名（`PROGRA~1`）/ macOS 的 `/tmp`→`/private/tmp` / 大小写，`relative()` 就会
+  算出 `../..`，本轮的临时件**全部静默漏报**。已用 NTFS junction 复现。
+- **运行时 cwd 改为优先读 `workingDirectory` 服务**。`session.header.cwd` 只在会话创建时写一次，
+  模型跑 `working_directory(cd: ...)` 之后不会更新 —— 只看 header 的话闸门会一直守着旧目录。
+  该服务是**可选**的，所以用 `ctx.get('workingDirectory')` 试探而不是加进 `inject`（加了会让
+  headless profile 整个不激活），取不到就退回 header。
+
+### Fixed — 看不见的写入
+
+- **三个 intent 事件都挂上**：`fs/write-intent`（新建/覆盖）、`fs/edit-intent`（原地改）、
+  `fs/delete-intent`（删除）。此前只挂 write，模型用 `edit` / `str_replace` 造出来的临时件在
+  通道 2 里完全看不见，只能靠 tmp 目录扫描和 `*.bak-*` 兜。delete-intent 记进来的路径在
+  `stat()` 那步自然失败 → 跳过，不会误报已删除的文件。
+
+### Fixed — 把作者的语言环境当成普遍默认
+
+- **注入文案不再硬编码中文**。新增 `lib/messages.js`（zh / en，纯函数、无依赖）与配置项
+  `messageLocale`（`auto` | `zh` | `en`，默认 `auto`）。`auto` 的回退链是
+  `DSH_LOCALE` / `LC_ALL` / `LC_MESSAGES` / `LANGUAGE` / `LANG` → 系统区域设置（`Intl`）→ `en`。
+  这段文字是**直接注入模型回合**的指令，不是 UI 装饰，非中文用户每轮都会多撞一条中文命令。
+  没用宿主语言服务，是因为宿主侧没有任何「当前语言」API 能在 turn-stopping 里廉价读到。
+- 消息对象补 `source.form = 'notice'` 与 `source.summary`，与宿主自己的 `modelSwitchNotice()`
+  对齐。`source.kind` 仍然不自称 `user` —— 宿主有若干处把 `source.kind === 'user'` 当人类授权
+  （`dsh-tool-goal` 的 `hasDirectHumanInput()`）。
+
+### Fixed — 装不上 / 声明了没人读
+
+- **`cordis.patch.yml` 收成两行纯 insert**。市场的「装完即用」靠热挂载实现：它把 patch 里的
+  insert 行重放进当前组合，让插件和它的面板不重启就上线。而 `dshmarket/lib/hot.js` 的
+  `scanPatch()` 只认 `id` / `name` / `config` / `disabled`，碰到别的键就整份拒绝 —— 0.3.x 的
+  `inject: []` 排在 `config:` 前面，正好撞上 `blocker: 'other'`，于是用户点完安装看到的是
+  「需重启」。现在条目只有 `id` + `name`，全部默认值交给 `normalizeConfig()` 兜底
+  （缺键即默认值），热挂载 `blocker: null`，装完立刻生效。想改默认值仍可用列 0 的顶层行合并。
+- **`engines.dsh` 移到顶层**。兼容闸门（`dsh-app-boot` 的 `unmetRequirements()`）读的是
+  `fields.engines.dsh`，没有才退到 `peerDependencies`；0.3.x 写在 `dsh.engines.dsh` 下面，
+  **那个位置从来没人读**，所以那条声明既拦不住也不会告警，等于没写。0.4.0 放到正确位置，
+  市场的预判闸门（`dshmarket` 的 `peerGateAt()`，注释写明「own `engines.dsh` decides ALONE」）
+  与宿主 boot 闸门从此读同一个字段。
+- **安装说明改写**。0.3.x 让用户 `add dsh-turn-cleanup`，而当时包没发布到 npm（`npm view` →
+  E404），任何人照做都会失败。0.4.0 起包发布到 npm，README 给出四条路径：市场点安装、
+  `add dsh-turn-cleanup`、`add github:Leonlee114514/dsh-turn-cleanup`（插件管理器的
+  `GIT_SHORTHAND` / `HOSTED_REPOSITORY_URL` 都接受）、以及手工 link；手工 link 步骤里的
+  profile 名改成 `<profile>` 占位。
+- **补上 `dsh.client.inject`**（`@deepseek-ai/dsh-client-ui-chat`、
+  `@deepseek-ai/dsh-client-ui-settings-general`）。它注册的 `conversation.chat.turnTail` 与
+  `settings.section` 分别由这两个包提供；这个字段是客户端模块的**加载顺序依赖**
+  （`dsh-client-modules` 按它拓扑排序），兄弟插件都声明了。
+
+### Fixed — 客户端 slot 装配
+
+- 去掉 `conversation.chat.turnTail` 的 `inject: () => ({ t })`。renderer 的 `standardKit` 已经
+  按 `entry.locale` 提供 locale 绑定的 `t`（`localeSeat(face, entry.locale)`），再 inject 一个
+  同名 prop 会被 `assertNoPropOverlap` 判成 ``received duplicate prop 't'``。
+
+### Changed — 测试与 CI
+
+- `test/sim.mjs` 从 16 场景 / 39 项扩到 26 场景 / 57 项，新增的全部是**可移植性回归**：
+  正常业务文件名不误伤、带分隔符的临时件仍命中、`protectedSegments` 整体替换、三个 intent
+  事件、`messageLocale` 中英切换、`workingDirectory` 优先于 `header.cwd`、junction cwd 归一。
+- **CI 现在也跑 `test/web.mjs` 与 `test/client.mjs`**。此前只有 ubuntu 上的 `sim.mjs`，
+  等于把最容易随宿主升级漂移的两块（webServer 路由、浏览器 bundle 契约）留在了没人看的角落。
+  顺带修掉过期的步骤标签（写着「14 scenarios / 35 assertions」，实际早就是 39）。
+
 ## [0.3.2] - 2026-11-12
 
 适配 DSH 0.2.2（cordis 4.1.0）。0.3.1 在 0.2.2 上**加载即失败**，闸门与面板同时消失。
@@ -41,7 +126,7 @@
 
 `agent.steer()` 让同一轮多跑一步，那一步成了 turn 的最后一步；而 chat UI 的
 `latestAnswer(turn)` 取的是 turn 内**最后一个 step** 的 assistant 文本
-（`@deepseek-ai/dsh-client-ui-chat/lib/client.js:10718`），于是真正的交付汇报被判成
+（`latestAnswer(turn)`，见 `@deepseek-ai/dsh-client-ui-chat/lib/client.js`），于是真正的交付汇报被判成
 「过程」折叠起来，屏幕上只剩清场汇报。功能没错，但用户看到的东西反了。
 
 ### Changed

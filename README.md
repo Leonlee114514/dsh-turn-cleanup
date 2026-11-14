@@ -18,7 +18,7 @@ DSH 三层都缺自动清理：
 | **组件层** | 只清自己的 `mkdtemp` scratch（`dsh-workspace-changes`、`dsh-sandbox-local`、`dsh-session-persistence-jsonl`、`dsh-attachment-local`），全是「自己拉屎自己擦」。 |
 | **提示词层** | `AGENTS.md` 里那类「交付前把本轮临时件清掉」的条款只有自觉力，没有强制力。模型忙着收尾时就忘了。 |
 
-结果就是工作区里慢慢堆起 `probe-*.mjs`、`check*.sh`、`*.bak-*`——每个都是某次探针的遗骸，
+结果就是工作区里慢慢堆起 `probe-*.mjs`、`check-*.sh`、`*.bak-*`——每个都是某次探针的遗骸，
 没人知道能不能删。
 
 本插件把这条自觉条款变成代码闸门。
@@ -30,7 +30,7 @@ DSH 三层都缺自动清理：
 `agent/turn-stopping` 是 `serial` 模式，await 在 turn 边界提交**之前**：
 
 ```js
-// dsh-agent-loop/lib/index.js:1009
+// dsh-agent-loop/lib/index.js:809-816
 if (turnEnds && this.inbox.nextStep.length === 0) {
   await this.dispatch.serial('agent/turn-stopping', { turn, signal });
   signal.throwIfAborted();
@@ -53,9 +53,14 @@ if (turnEnds && this.inbox.nextStep.length === 0) break;
 
 ### 通道 2 — 本 turn 写入追踪（覆盖不守约定的情况）
 
-挂 `fs/write-intent` waterfall，按 `session.id + turn` 分桶记录写入路径。turn 结束时只检查
-**这些路径**里文件名匹配临时件特征的（`probe-*` / `tmp-*` / `scratch-*` / `check*` / `diag_*` /
-`bench*` / `*.bak-*`，或位于 `.agent-tmp/`）。
+挂 `fs/write-intent` / `fs/edit-intent` / `fs/delete-intent` 三个 waterfall，按 `session.id + turn`
+分桶记录写入路径。三个都要挂：宿主把「新建/覆盖」走 write-intent，「原地改」走 edit-intent，
+「删除」走 delete-intent（`dsh-tool-fs`、`dsh-tool-str-replace-editor` 各自 emit），只挂 write 的话
+模型用 `edit` / `str_replace` 造出来的临时件完全看不见。
+
+turn 结束时只检查**这些路径**里文件名匹配临时件特征的（`probe-*` / `tmp-*` / `scratch-*` /
+`check-*` / `check_*` / `diag_*` / `bench-*` / `bench_*` / `*.bak-*`，或位于 `.agent-tmp/`）。
+匹配对象是**文件名**（不是路径），大小写不敏感。
 
 **绝不扫全工作区。** 存量未跟踪文件不参与判定——判定严格等于：
 
@@ -77,7 +82,7 @@ if (turnEnds && this.inbox.nextStep.length === 0) break;
 （`.bak-0926`、`.bak-1793445543005`、`.bak-autodetect-20261102-080912`、`.bak-purge`、
 裸 `.bak`），任何「按日期正则解析」的做法都会漏掉一半。
 
-只处理**本轮碰过的家族**：seeds 来自 `fs/write-intent` 记录 + `.agent-tmp/` 扫描结果，
+只处理**本轮碰过的家族**：seeds 来自三个 intent 事件记录 + `.agent-tmp/` 扫描结果，
 推不出原件名的直接跳过。每个目录只 `readdir` 一次，不扫全盘。
 
 两种模式：
@@ -89,7 +94,8 @@ if (turnEnds && this.inbox.nextStep.length === 0) break;
 
 1. **原件必须仍在**。原件没了，那几份备份可能是唯一副本 —— 整族跳过，一条都不删。
 2. **`lstat` 是普通文件、不是符号链接**。不跟链，避免删到链外的真文件。
-3. **不在保护段**（`.git` / `node_modules` / `.tmp-sessions` / `out`），且在工作区之内。
+3. **不在保护段**，且在工作区之内。默认保护段是 `.git` / `node_modules` / `out` / `dist` /
+   `build` / `target` / `vendor` / `.venv` / `__pycache__`，可用 `protectedSegments` 整体替换。
 4. **每轮删除条数上限**（`maxPrunePerTurn`，默认 50）。
 
 刻意**不做**「备份比原件新就不删」：备份是某个历史状态的副本，原件比它新才是常态；
@@ -99,7 +105,7 @@ if (turnEnds && this.inbox.nextStep.length === 0) break;
 ### 明确不做
 
 - **通道 1 / 2 永远不删任何文件** —— 只 steer，删不删、留不留由模型判断（交付物、用户文件、
-  `.tmp-sessions`、`.git`、`node_modules`、`out/` 一律不碰）。只有通道 3 的 `prune` 模式会删，
+  `.git`、`node_modules`、`out/`、`dist/`、`build/` 等保护段一律不碰）。只有通道 3 的 `prune` 模式会删，
   且只删备份副本，四道闸见上。
 - **不做 `git status` 兜底** —— 大仓库慢，且存量未跟踪文件极多，容易误判。
 - **子会话整段跳过** —— `origin === "subagent"` 或 `delegationDepth > 0` 时直接 return，它们的
@@ -118,29 +124,49 @@ if (turnEnds && this.inbox.nextStep.length === 0) break;
 
 ---
 
-## steer 文案
+## 注入文案
+
+这段文字是**直接注入模型回合**的指令，所以它的语言可配（`messageLocale`，默认 `auto`）。
+`auto` 的回退链：`DSH_LOCALE` / `LC_ALL` / `LC_MESSAGES` / `LANGUAGE` / `LANG` → 系统区域设置
+（`Intl`）→ `en`。想固定就写 `zh` 或 `en`。
+
+中文（`messageLocale: zh`，或 `auto` 命中中文环境）：
 
 ```
 收尾前清场：这些是本轮你留下的临时文件——
 - .agent-tmp/scratch-run.log
 - probe-yyy.mjs
-删掉它们；要留的逐条说明理由并挪到明确位置。交付物、用户文件、.tmp-sessions、.git 不要动。
+删掉它们；要留的逐条说明理由并挪到明确位置。交付物、用户文件、受保护目录不要动。
 ```
 
-超过 `maxSteerPaths` 时追加 `- …还有 N 个`。
+英文（`messageLocale: en`）：
 
-临时件与超量备份同时存在时，文案分两段，中间空一行：
+```
+Clean up before you finish: these temporary files were produced in this turn —
+- .agent-tmp/scratch-run.log
+- probe-yyy.mjs
+Delete them. If one must stay, say why for each and move it somewhere deliberate. Do not touch deliverables, user files, or protected directories.
+```
+
+超过 `maxSteerPaths` 时追加 `- …还有 N 个`（英文 `- …and N more`）。
+
+临时件与超量备份同时存在时，文案分两段，中间空一行（下面是中文版）：
 
 ```
 收尾前清场：这些是本轮你留下的临时文件——
 - .agent-tmp/scratch-run.log
-删掉它们；要留的逐条说明理由并挪到明确位置。交付物、用户文件、.tmp-sessions、.git 不要动。
+删掉它们；要留的逐条说明理由并挪到明确位置。交付物、用户文件、受保护目录不要动。
 
 备份超量：同一原件的 .bak 只保留最近 3 份，这些是多余的——
 - cfg-demo.yml.bak-r1
 - cfg-demo.yml.bak-r2
 删掉它们；要留的先挪到明确位置并说明理由。不要动原件本身，也不要动最近 3 份。
 ```
+
+消息对象带 `source: { kind: 'dsh-turn-cleanup', form: 'notice', summary }`：
+`kind` 不自称 `user`（宿主有若干处把 `source.kind === 'user'` 当人类授权，
+`dsh-tool-goal` 的 `hasDirectHumanInput()` 就是一例），`form: 'notice'` 与宿主自己的
+`modelSwitchNotice()` 对齐。
 
 分两段而不是混在一起，是因为两件事的约束不同：临时件没有「保留几份」的概念，备份有；
 而备份段必须显式提醒「不要动原件、不要动最近 N 份」，否则模型容易把整族一起删掉。
@@ -149,24 +175,35 @@ if (turnEnds && this.inbox.nextStep.length === 0) break;
 
 ## 安装
 
-包带 `dsh.bundle`，所以两种装法都行。
+包带 `dsh.bundle`，所以三种装法都行。**装完不需要改任何配置**：包根的
+`cordis.patch.yml` 会在安装时自动插入 loader 条目，所有配置项都有内置默认值。
 
-**A. 走市场 / bundle 安装（推荐）**
+**A. 从市场点安装（最省事）**
 
-```
-plugin_manager install_bundle → "dsh-turn-cleanup"
-```
+插件在 [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)
+目录里，DSH 的 Plugins → Discover（或 dshmarket）搜 `turn-cleanup` 点安装即可。
+装完即生效，不用重启。
 
-或命令行：
+**B. 命令行（bundle 安装）**
 
 ```bash
-dsh plugin --profile <name> add dsh-turn-cleanup
+dsh plugin --profile <profile> add dsh-turn-cleanup
+```
+
+`<profile>` 换成你自己的：`~/.dsh/profiles/` 下有哪些目录就用哪个名字。
+
+**C. git 源（想跟 main 分支）**
+
+```bash
+dsh plugin --profile <profile> add github:Leonlee114514/dsh-turn-cleanup
+# 等价写法：
+#   dsh plugin --profile <profile> add https://github.com/Leonlee114514/dsh-turn-cleanup
 ```
 
 包根的 `cordis.patch.yml` 会被自动应用，闸门默认开启，配置用默认值。要改配置就在自己 profile 的
 `cordis.patch.yml` 里按同一个 id 覆盖，不要另加一条 `- insert`（同 id 两条会被 cordis 拒绝注册）。
 
-**B. 手工 link（源码改动时用，改完 HMR 直接生效）**
+**D. 手工 link（源码改动时用，改完 HMR 直接生效）**
 
 ```bash
 # 1. 克隆到本地
@@ -176,41 +213,45 @@ git clone https://github.com/Leonlee114514/dsh-turn-cleanup.git ~/.dsh/local-pkg
 #    "dsh-turn-cleanup": "link:../../local-pkgs/dsh-turn-cleanup"
 
 # 3. 建符号链接（pnpm install 在有远端依赖时会卡住，手工建更可靠）
+#    `desktop` 换成你自己的 profile 名：~/.dsh/profiles/ 下有哪些就用哪个
 node -e "
 const { symlinkSync } = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const profile = process.env.DSH_PROFILE || 'desktop';   // ← 改成你的 profile 名
 symlinkSync(
-  require('node:path').join(require('node:os').homedir(), '.dsh/local-pkgs/dsh-turn-cleanup'),
-  require('node:path').join(require('node:os').homedir(), '.dsh/profiles/desktop/node_modules/dsh-turn-cleanup'),
-  'junction'
+  path.join(os.homedir(), '.dsh/local-pkgs/dsh-turn-cleanup'),
+  path.join(os.homedir(), '.dsh/profiles', profile, 'node_modules/dsh-turn-cleanup'),
+  'junction'   // POSIX 上被忽略，等价于普通 symlink
 )"
 ```
 
 ```yaml
-# 4. 只在手工 link 时需要：在 ~/.dsh/profiles/desktop/cordis.patch.yml 顶层加条目
-#    （走 A 的 bundle 安装则跳过这步，包根的 cordis.patch.yml 已经带了同一条）
+# 4. 只在手工 link 时需要：在 ~/.dsh/profiles/<profile>/cordis.patch.yml 顶层加条目
+#    （走 A/B/C 的 bundle 安装则跳过这步，包根的 cordis.patch.yml 已经带了同一条）
 - insert:
     - id: turn-cleanup
       name: dsh-turn-cleanup
-      inject: []
-      config:
-        enabled: true
-        tmpDirName: .agent-tmp
-        patterns:
-          - "probe-*"
-          - "tmp-*"
-          - "scratch-*"
-          - "check*"
-          - "diag_*"
-          - "bench*"
-          - "*.bak-*"
-        scanDepth: 4
-        maxLogPaths: 10
-        maxSteerPaths: 20
-        logFile: ""     # 可选：落盘旁路，留空 = 只走 ctx.logger
 ```
 
-**不需要重启 DSH。** `dsh-hmr` 监听 `cordis.patch.yml` 与 `package.json`，改动即
-`reconcileProfile()` 重组合，十几秒后新版本就生效。
+只想改个别默认值时，不要加第二条 `- insert`（同 id 两条会被 cordis 拒绝注册），
+而是加一条**顶层**（列 0）的行去合并进已有条目：
+
+```yaml
+# ~/.dsh/profiles/<profile>/cordis.patch.yml，列 0 开始
+- id: turn-cleanup
+  config:
+    steerMode: steer          # 同轮多跑一步，而不是排进下一轮
+    logFile: /tmp/tc.log      # 落盘旁路
+```
+
+全部可覆盖项见下面的「配置」表；未写的键一律用内置默认值。
+
+**装完要不要重启？** 走 A（市场）时不用：market 会把刚装的插件热挂载进当前组合，宿主侧
+loader 条目和浏览器端面板同时上线。走 B/C 时 `dsh plugin add` 只写 `dsh.profile.bundles`，
+下次启动生效；想立刻生效就在 Plugins 页重新启用一次（market 会做同样的热挂载）。
+走 D 时 `dsh-hmr` 监听 `cordis.patch.yml` 与 `package.json`，改动即 `reconcileProfile()`
+重组合，十几秒后新版本就生效。
 
 验证加载成功：
 
@@ -229,7 +270,9 @@ schema（本插件故意不导出，避免 schemastery 依赖）。若显示 `in
 | --- | --- | --- |
 | `enabled` | `true` | `false` → 完全不装闸门（连 listener 都不注册） |
 | `tmpDirName` | `.agent-tmp` | 约定目录名，相对 cwd |
-| `patterns` | 见上 | 文件名 glob，只支持 `*` / `?`，大小写不敏感 |
+| `patterns` | `probe-*` `tmp-*` `scratch-*` `check-*` `check_*` `diag_*` `bench-*` `bench_*` `*.bak-*` | 文件名 glob，只支持 `*` / `?`，大小写不敏感；匹配的是 basename |
+| `protectedSegments` | `.git` `node_modules` `out` `dist` `build` `target` `vendor` `.venv` `__pycache__` | 这些目录段下的东西一律不报；**给数组则整体替换**默认值 |
+| `messageLocale` | `auto` | 注入文案语言：`auto` / `zh` / `en` |
 | `scanDepth` | `4` | `.agent-tmp` 递归深度，1..6 |
 | `maxLogPaths` | `10` | 日志里最多列几条 |
 | `maxSteerPaths` | `20` | steer 文案里最多列几条 |
@@ -257,7 +300,9 @@ schema（本插件故意不导出，避免 schemastery 依赖）。若显示 `in
 | 依从率复核点 | `turn + 1` 的 turn/end | 本轮的 turn/end |
 
 **为什么默认 followup**：chat UI 按 turn 折叠，`latestAnswer(turn)` 取的是
-**turn 内最后一个 step 的 assistant 文本**（`@deepseek-ai/dsh-client-ui-chat/lib/client.js:10718`）。
+**turn 内最后一个 step 的 assistant 文本**（`latestAnswer(turn)`，在
+`@deepseek-ai/dsh-client-ui-chat/lib/client.js` 里 —— 该文件是压缩成 20 行的 bundle，
+函数体在第 19 行，别按行号找，按名字搜）。
 steer 那一步成为最后一步，于是真正的交付汇报被折进「过程」区，屏幕上只剩清场汇报。
 followup 把清单排到下一轮，本轮最后一步仍是汇报本身，折叠不会发生；`kick()` 的
 `while (await this.turn())` 会在队列有 next-turn 时自动接着跑，所以清场照样执行。
@@ -321,8 +366,14 @@ service + RPC 契约轻得多，也不用管 relay / 远程模式的 origin 探�
 
 ## 宿主版本兼容
 
-只用 Node 内建（`node:fs/promises`、`node:crypto`、`node:path`）加几个宿主钩子，没有
-`peerDependencies`、没有 `engines.dsh`，所以不会被 profile 的兼容闸门拦下。实测跑过的宿主：
+只用 Node 内建（`node:fs/promises`、`node:crypto`、`node:path`）加几个宿主钩子，没有运行时
+依赖、没有 `peerDependencies`。宿主兼容闸门读的是**顶层 `engines.dsh`**（见
+`dsh-app-boot` 的 `unmetRequirements()`：先看 `fields.engines.dsh`，没有才退到
+`peerDependencies` 里名为 `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` 的项）。0.4.0 起这个字段
+放在正确的位置，写的是 `">=0.2.1-rc.5"`。
+
+（0.3.x 及以前把它写在 `dsh.engines.dsh` 下面 —— 闸门从来不读那个位置，所以那条声明既拦不住
+也不会告警，等于没写。`dsh.bundle.patch` / `dsh.client` 仍在 `dsh` 下面，那两个是真的。）实测跑过的宿主：
 
 | DSH | cordis | 状态 | 差异 |
 | --- | --- | --- | --- |
@@ -330,8 +381,14 @@ service + RPC 契约轻得多，也不用管 relay / 远程模式的 origin 探�
 | 0.2.2-rc.2 | 4.1.0 | ✅ 0.3.2 起 | `ctx.inject()` 变 then-only；`client-modules` 删掉 `pkgMeta` 缓存 |
 
 依赖的钩子在两个版本里语义一致：`session/event`（`turn/start` / `turn/end`）、
-`session/disposed`、`fs/write-intent` / `fs/edit-intent`、`agent/turn-stopping`、
-`agent.steer` / `agent.followup`、`ctx.webServer.register`、`ctx.effect`。
+`session/disposed`、`fs/write-intent` / `fs/edit-intent` / `fs/delete-intent`、
+`agent/turn-stopping`、`agent.steer` / `agent.followup`、`ctx.webServer.register`、`ctx.effect`、
+以及可选的 `workingDirectory` 服务（存在就用它取运行时 cwd，不存在退回 `session.header.cwd`）。
+
+客户端 half 声明了 `dsh.client.inject: ["@deepseek-ai/dsh-client-ui-chat",
+"@deepseek-ai/dsh-client-ui-settings-general"]` —— 它注册的 `conversation.chat.turnTail` 与
+`settings.section` 两个 slot 分别由这两个包提供。这个字段是**客户端模块的加载顺序依赖**
+（`dsh-client-modules` 按它做拓扑排序，查不到就静默跳过），不是 cordis 服务注入。
 
 0.3.2 之前的版本在 0.2.2 上会在加载时抛 `ctx.inject(...).catch is not a function`，
 插件整个不生效（闸门、面板全无）。升级宿主后如果看不到面板、也没有 `turn-cleanup.log`，
@@ -361,14 +418,20 @@ service + RPC 契约轻得多，也不用管 relay / 远程模式的 origin 探�
 单元测试（假 ctx 模拟 agent-loop 调用顺序，不依赖 DSH 运行时）：
 
 ```bash
-npm test        # 39 + 19 + 26 = 84 checks passed
+npm test        # 57 + 19 + 25 = 101 checks passed
 npm run verify  # syntax check + test
 ```
 
-三份测试各管一段：`test/sim.mjs` 驱动闸门与三个通道（39 项）、`test/web.mjs` 驱动
+三份测试各管一段：`test/sim.mjs` 驱动闸门与三个通道（57 项）、`test/web.mjs` 驱动
 StatsStore 与 `/turn-cleanup/stats` 端点、以及 then-only 的 `ctx.inject` 假实现（19 项）、
 `test/client.mjs` 用假 `window.__ModuleLoader__` 加载真实 client bundle、断言 slot 注册
-形状与 locale 字典（26 项）。
+形状与 locale 字典（25 项）。三份都在 CI 里跑（ubuntu × node 20/22/24，加 windows/macos）。
+
+`test/sim.mjs` 里有几项是**可移植性回归**，专门锁住「本机能跑、别人机器上误伤/漏报」的坑：
+正常业务文件名（`checkout.js` / `Checklist.md` / `benchmark.ts`）不误伤、带分隔符的
+`check-1.sh` / `bench_2.mjs` 仍命中、`protectedSegments` 可整体替换、`fs/edit-intent` 与
+`fs/delete-intent` 也记账、`messageLocale` 中英切换、`workingDirectory` 服务优先于
+`header.cwd`、cwd 是 junction 时经 realpath 归一仍能命中。
 
 ---
 
@@ -427,7 +490,7 @@ sub.effect(() => {
 
 `turn-stopping` 里 `agent.steer()` 让同一轮多跑一步，那一步成了 turn 的最后一步。而
 chat UI 的 `latestAnswer(turn)` 取的是 **turn 内最后一个 step 的 assistant 文本**
-（`@deepseek-ai/dsh-client-ui-chat/lib/client.js:10718`），于是真正的交付汇报被判成
+（`latestAnswer(turn)`，见 `@deepseek-ai/dsh-client-ui-chat/lib/client.js`），于是真正的交付汇报被判成
 「过程」折叠起来，屏幕上只剩清场汇报。
 
 改成交付走 `agent.followup()`：清单排进 `next-turn`，本轮正常收尾、汇报仍是最后一步；

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { apply, name, inject } from '../lib/index.js'
 
 const log = []
-function makeCtx() {
+function makeCtx(services = {}) {
   const listeners = new Map()
   const logger = {
     info: (m) => log.push(['info', m]),
@@ -15,6 +15,11 @@ function makeCtx() {
   }
   return {
     logger,
+    // 可选服务探测口：插件用 ctx.get('workingDirectory') 取运行时 cwd，
+    // 拿不到就退回 session.header.cwd。这里按需注入假服务。
+    get(name) {
+      return services[name]
+    },
     on(evt, cb) {
       if (!listeners.has(evt)) listeners.set(evt, [])
       listeners.get(evt).push(cb)
@@ -41,10 +46,11 @@ function makeCtx() {
   }
 }
 
-function makeAgent(root, { origin = 'user', delegationDepth = 0, id = 'sess-1', noFollowup = false } = {}) {
+function makeAgent(root, { origin = 'user', delegationDepth = 0, id = 'sess-1', noFollowup = false, headerCwd } = {}) {
   const steered = []
   const modes = []
-  const session = { id, header: { cwd: root, origin, delegationDepth } }
+  // headerCwd 用来模拟「会话创建时的 cwd」与「实际写入目录」不一致（符号链接 / junction）。
+  const session = { id, header: { cwd: headerCwd ?? root, origin, delegationDepth } }
   const agent = {
     session,
     status: 'running',
@@ -78,12 +84,12 @@ async function exists(abs) {
   }
 }
 
-async function scenario(label, { root, setup, origin, delegationDepth, files, recorded, expectSteer, expectFiles, expectMode, noFollowup, config = {}, steps = 1 }) {
-  const ctx = makeCtx()
+async function scenario(label, { root, setup, origin, delegationDepth, files, recorded, expectSteer, expectFiles, expectMode, noFollowup, config = {}, steps = 1, services = {}, headerCwd, intentEvent = 'fs/write-intent' }) {
+  const ctx = makeCtx(services)
   // 默认关掉统计账本：假 ctx 没有 $DSH_HOME 概念，开着会把测试数据写进真实账本。
   // 需要验证统计的场景显式传 stats: true + statsFile。
   apply(ctx, { enabled: true, stats: false, ...config })
-  const { agent, steered, modes } = makeAgent(root, { origin, delegationDepth, noFollowup })
+  const { agent, steered, modes } = makeAgent(root, { origin, delegationDepth, noFollowup, headerCwd })
   if (setup) await setup()
 
   // turn 1 开始
@@ -94,13 +100,13 @@ async function scenario(label, { root, setup, origin, delegationDepth, files, re
     const abs = join(root, f)
     await mkdir(join(abs, '..'), { recursive: true })
     await writeFile(abs, 'x')
-    await ctx.emitWaterfall('fs/write-intent', { targetKey: abs }, { agent }, () => undefined)
+    await ctx.emitWaterfall(intentEvent, { targetKey: abs }, { agent }, () => undefined)
   }
 
   // 只登记写入意图、不重写文件（保住 mtime 顺序，用于备份家族判定）
   for (const f of recorded ?? []) {
     const abs = join(root, f)
-    await ctx.emitWaterfall('fs/write-intent', { targetKey: abs }, { agent }, () => undefined)
+    await ctx.emitWaterfall(intentEvent, { targetKey: abs }, { agent }, () => undefined)
   }
 
   // 模拟 agent-loop 的 turn-stopping 闸门，最多允许 steps 次交付
@@ -378,6 +384,135 @@ await scenario('6 子会话 subagent', {
   const alive = []
   for (const n of names) if (await exists(join(root, n))) alive.push(n)
   check('14 关闭 · 6 份全留', alive.length === 6, `alive=${alive.length}/6`)
+}
+
+// === 17-22 可移植性回归：这些是审计里实测过的误伤/漏报，锁住不让它回来 ===
+
+// 17 裸 check* / bench* 曾按文件名前缀吃掉正常业务代码 —— 现在不该再报
+await scenario('17 正常业务文件名不误伤', {
+  root: base + '/s17',
+  files: ['checkout.js', 'Checklist.md', 'benchmark.ts', 'checks.py'],
+  expectSteer: false
+})
+
+// 18 但带分隔符的临时件仍然要报（模式的本来用途）
+await scenario('18 带分隔符的临时件仍命中', {
+  root: base + '/s18',
+  files: ['check-1.sh', 'bench_2.mjs'],
+  expectSteer: true,
+  expectFiles: ['check-1.sh', 'bench_2.mjs']
+})
+
+// 19 默认保护段覆盖各生态通用构建目录（dist/build/target/vendor/...）
+await scenario('19 默认保护段 dist', {
+  root: base + '/s19',
+  files: ['dist/probe-a.mjs'],
+  expectSteer: false
+})
+
+// 20 protectedSegments 显式给值时**整体替换**默认值 —— 用户要能取消某个默认保护段
+await scenario('20 protectedSegments 可覆盖默认值', {
+  root: base + '/s20',
+  files: ['dist/probe-a.mjs'],
+  expectSteer: true,
+  config: { protectedSegments: ['.git'] }
+})
+
+// 21 fs/edit-intent 也要记账：模型用 edit/str_replace 造临时件时不会走 write-intent
+await scenario('21 fs/edit-intent 也记账', {
+  root: base + '/s21',
+  files: ['probe-edited.mjs'],
+  intentEvent: 'fs/edit-intent',
+  expectSteer: true
+})
+
+// 22 fs/delete-intent 记账后 stat 失败 → 自然跳过，不该报已删除的路径
+await scenario('22 fs/delete-intent 不误报', {
+  root: base + '/s22',
+  recorded: ['probe-deleted.mjs'],
+  intentEvent: 'fs/delete-intent',
+  expectSteer: false
+})
+
+// 23 注入文案的语言可配（原先把中文硬编码进了模型回合）
+{
+  const rZh = await scenario('23 messageLocale zh', {
+    root: base + '/s23zh',
+    files: ['probe-lang.mjs'],
+    expectSteer: true,
+    config: { messageLocale: 'zh' }
+  })
+  const zhText = rZh.steered[0]?.content[0].text ?? ''
+  check('23 zh · 文案是中文', zhText.includes('收尾前清场'), zhText.split('\n')[0])
+
+  const rEn = await scenario('23 messageLocale en', {
+    root: base + '/s23en',
+    files: ['probe-lang.mjs'],
+    expectSteer: true,
+    config: { messageLocale: 'en' }
+  })
+  const enText = rEn.steered[0]?.content[0].text ?? ''
+  check('23 en · 文案是英文', enText.includes('Clean up before you finish'), enText.split('\n')[0])
+  check('23 en · 不再混入中文', !/[\u4e00-\u9fff]/.test(enText), 'no CJK')
+
+  // source.form = 'notice' 让 chat UI 知道这不是用户说的话
+  const src = rEn.steered[0]?.source ?? {}
+  check('23 · source.kind 不自称用户', src.kind === 'dsh-turn-cleanup', String(src.kind))
+  check('23 · source.form = notice', src.form === 'notice', String(src.form))
+  check('23 · source.summary 存在', typeof src.summary === 'string' && src.summary.length > 0, String(src.summary))
+}
+
+// 24b header.cwd 缺失时不能拿 workingDirectory 的 defaultDirectory 顶替：
+//     宿主 projection 的 init 是 `header.cwd ?? null`，state 为 null 时 get() 返回
+//     process.cwd() —— 那是进程目录，不是这个会话的目录。
+{
+  const strayDir = base + '/s24b-stray'
+  await mkdir(strayDir, { recursive: true })
+  await scenario('24b header.cwd 缺失时不越界扫进程目录', {
+    root: strayDir,
+    headerCwd: '',
+    files: ['probe-stray.mjs'],
+    expectSteer: false,
+    services: { workingDirectory: { get: () => strayDir } }
+  })
+}
+
+// 24 运行时 cwd 跟随 working_directory(cd: ...)：header.cwd 是会话创建时的旧目录
+{
+  const oldDir = base + '/s24-old'
+  const newDir = base + '/s24-new'
+  await mkdir(oldDir, { recursive: true })
+  await mkdir(newDir, { recursive: true })
+  await scenario('24 workingDirectory 服务优先于 header.cwd', {
+    root: newDir,
+    headerCwd: oldDir,
+    files: ['probe-cd.mjs'],
+    expectSteer: true,
+    services: { workingDirectory: { get: () => newDir } }
+  })
+}
+
+// 25 cwd 是符号链接/junction 时，写入侧路径是 realpath —— 归一后仍要能命中
+{
+  const realDir = base + '/s25-real'
+  const linkDir = base + '/s25-link'
+  await mkdir(realDir, { recursive: true })
+  let linked = true
+  try {
+    await symlink(realDir, linkDir, 'junction')
+  } catch {
+    linked = false
+  }
+  if (!linked) {
+    console.log('SKIP  25 junction cwd · 本机不能建目录联接')
+  } else {
+    await scenario('25 junction cwd 归一后命中', {
+      root: realDir,
+      headerCwd: linkDir,
+      files: ['probe-junction.mjs'],
+      expectSteer: true
+    })
+  }
 }
 
 console.log('\n=== 日志样本 ===')

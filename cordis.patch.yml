@@ -1,45 +1,57 @@
 # dsh-turn-cleanup — bundle manifest entry.
 #
-# `dsh plugin add dsh-turn-cleanup` applies this patch, which mounts the gate
-# with its defaults on. Override any key under the same id in your own profile's
-# cordis.patch.yml:
+# Install:
 #
-#   enabled: false          → installed but inert (no listener registered at all)
-#   tmpDirName: .scratch    → a different convention directory
-#   patterns: ["probe-*"]   → a narrower set of temporary-file patterns
+#   dsh plugin --profile <profile> add dsh-turn-cleanup
+#   dsh plugin --profile <profile> add github:Leonlee114514/dsh-turn-cleanup
 #
-# If you already registered the plugin by hand (manual link + a `- id: turn-cleanup`
-# row of your own), remove that row first: two rows with the same loader entry id
-# make cordis reject the duplicate, and the plugin would install without
-# registering.
+# ---------------------------------------------------------------------------
+# Why this file contains NOTHING but `id` and `name`
+# ---------------------------------------------------------------------------
+# The market hot-mounts a freshly installed plugin so it goes live without a
+# restart. It does that by replaying the patch's plain insert rows, and it
+# refuses the whole patch when it meets any other key:
+#
+#   dshmarket/lib/hot.js  scanPatch()
+#     key === 'config'                 → blocker 'config'
+#     key === 'disabled' | 'enabled'   → blocker 'disabled'
+#     anything else (inject, …)        → blocker 'other'
+#
+# A blocker is not an error — the plugin still loads on the next boot — but the
+# user who just clicked Install sees "restart required", which is exactly the
+# experience this file avoids. So the entry stays minimal: every default lives
+# in lib/index.js normalizeConfig(), where a missing key is the same as the
+# documented default.
+#
+# ---------------------------------------------------------------------------
+# Overriding a default
+# ---------------------------------------------------------------------------
+# Do NOT add a second insert row — two rows inserting the same loader entry id
+# make cordis reject the composition and the plugin installs without
+# registering. Add a TOP-LEVEL row instead: a patch row at column 0 targets the
+# existing entry and merges into it.
+#
+#   - id: turn-cleanup
+#     config:
+#       enabled: false            # installed but inert (no listener at all)
+#       tmpDirName: .scratch      # a different convention directory
+#       patterns: ["probe-*"]     # a narrower set of temporary-file patterns
+#       protectedSegments: [.git] # replaces (not extends) the default dirs
+#       messageLocale: en         # language of the injected notice (auto|zh|en)
+#       steerMode: steer          # same-turn nudge instead of a follow-up turn
+#       backupRetention:
+#         keep: 5
+#
+# Defaults, for reference (lib/index.js):
+#   patterns           probe-* tmp-* scratch-* check-* check_* diag_*
+#                      bench-* bench_* *.bak-*
+#   protectedSegments  .git node_modules out dist build target vendor
+#                      .venv __pycache__
+#   tmpDirName .agent-tmp · scanDepth 4 · maxLogPaths 10 · maxSteerPaths 20
+#   logFile "" (no text log) · stats true · statsFile "" ($DSH_HOME/logs)
+#   messageLocale auto · steerMode followup
+#   backupRetention { enabled true, keep 3, mode steer,
+#                     requireOriginalPresent true, maxPrunePerTurn 50 }
 - insert:
     - id: turn-cleanup
       name: dsh-turn-cleanup
-      inject: []
-      config:
-        enabled: true
-        tmpDirName: .agent-tmp
-        patterns:
-          - "probe-*"
-          - "tmp-*"
-          - "scratch-*"
-          - "check*"
-          - "diag_*"
-          - "bench*"
-          - "*.bak-*"
-        scanDepth: 4
-        maxLogPaths: 10
-        maxSteerPaths: 20
-        logFile: ""
-        # 交付方式：followup = 另开一轮清场（默认，交付汇报不会被折叠）
-        #           steer    = 同轮多跑一步（闸门更硬，但汇报会被折进「过程」）
-        steerMode: followup
-        # 统计账本（Web 面板读它）。空 statsFile = 与 logFile 同目录。
-        stats: true
-        statsFile: ""
-        backupRetention:
-          enabled: true
-          keep: 3
-          mode: steer
-          requireOriginalPresent: true
-          maxPrunePerTurn: 50
