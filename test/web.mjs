@@ -156,6 +156,19 @@ check('recent 行的复核带体积',
   all.json.recent?.[0]?.verify?.cleanedBytes === 1 && all.json.recent?.[0]?.verify?.remainingBytes === 1,
   JSON.stringify(all.json.recent?.[0]?.verify))
 
+// v3：模型自己先清干净的那部分单独记，面板的「已释放空间」= cleanedBytes + preCleanedBytes。
+// 这个场景里模型没抢在闸门之前动手（闸门当场就报了两个 probe），所以 preCleaned 应为 0，
+// 但字段必须存在——缺字段会让面板拿到 undefined 而不是 0。
+check('汇总带 preCleaned / preCleanedBytes 字段',
+  all.json.preCleaned === 0 && all.json.preCleanedBytes === 0,
+  JSON.stringify({ preCleaned: all.json.preCleaned, preCleanedBytes: all.json.preCleanedBytes }))
+check('recent 行带 kind 与 preCleaned',
+  all.json.recent?.[0]?.kind === 'gate' && all.json.recent?.[0]?.preCleaned === 0,
+  JSON.stringify({ kind: all.json.recent?.[0]?.kind, preCleaned: all.json.recent?.[0]?.preCleaned }))
+check('bySession 行带 preCleanedBytes',
+  all.json.bySession?.[0]?.preCleanedBytes === 0,
+  String(all.json.bySession?.[0]?.preCleanedBytes))
+
 const perSession = await callRoute('/turn-cleanup/stats?scope=session&sid=sess-web-1')
 check('单会话 gates=1', perSession.json.scope === 'session' && perSession.json.gates === 1,
   `${perSession.json.scope}/${perSession.json.gates}`)

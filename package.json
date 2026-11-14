@@ -1,7 +1,7 @@
 {
   "name": "dsh-turn-cleanup",
-  "version": "0.5.0",
-  "description": "turn 结束时拦住本轮留下的临时文件（约定目录 + 本 turn 写入追踪，含 edit/delete）与超量备份（同一原件的 .bak 只留最近 N 份），非空则注入一条清场提示；附带 Web 面板统计拦截次数、已清文件数、释放空间与依从率。",
+  "version": "0.6.0",
+  "description": "turn 结束时拦住本轮留下的临时文件（约定目录 + 本 turn 写入追踪，含 edit/delete）与超量备份（同一原件的 .bak 只留最近 N 份），非空则注入一条清场提示；模型也可用 report_temp_cleanup 主动上报删掉的路径与体积。附带 Web 面板统计拦截次数、已清文件数、释放空间与依从率。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -50,8 +50,8 @@
     "dsh": ">=0.2.1-rc.5"
   },
   "scripts": {
-    "check": "node --check lib/index.js && node --check lib/stats.js && node --check lib/messages.js && node --check lib/client.js && node --check test/sim.mjs && node --check test/web.mjs && node --check test/client.mjs",
-    "test": "node test/sim.mjs && node test/web.mjs && node test/client.mjs",
+    "check": "node --check lib/index.js && node --check lib/stats.js && node --check lib/messages.js && node --check lib/client.js && node --check test/sim.mjs && node --check test/web.mjs && node --check test/client.mjs && node --check test/report.mjs",
+    "test": "node test/sim.mjs && node test/web.mjs && node test/client.mjs && node test/report.mjs",
     "verify": "npm run check && npm test"
   }
 }

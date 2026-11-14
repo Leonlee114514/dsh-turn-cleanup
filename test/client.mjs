@@ -178,6 +178,17 @@ check(bytes(75 * 1024) === '75.0 KB', 'fmtBytes(75 KiB) → 75.0 KB', bytes(75 *
 check(bytes(1024 * 1024) === '1.00 MB', 'fmtBytes(1 MiB) → 1.00 MB', bytes(1024 * 1024))
 check(bytes(3 * 1024 * 1024 * 1024) === '3.00 GB', 'fmtBytes(3 GiB) → 3.00 GB', bytes(3 * 1024 * 1024 * 1024))
 
+// --- freedBytes: 面板「已释放空间」的真正口径 ---------------------------------
+// 只看 cleanedBytes 会长期显示 0 B：模型几乎总在复核之前就把临时件 rm 掉了。
+check(typeof plugin.freedBytes === 'function', 'exports freedBytes for the size card')
+const freed = plugin.freedBytes ?? (() => -1)
+check(freed({ cleanedBytes: 100, preCleanedBytes: 250 }) === 350, 'freedBytes sums both sources', String(freed({ cleanedBytes: 100, preCleanedBytes: 250 })))
+check(freed({ cleanedBytes: 100 }) === 100, 'freedBytes tolerates missing preCleanedBytes', String(freed({ cleanedBytes: 100 })))
+check(freed({ preCleanedBytes: 40 }) === 40, 'freedBytes tolerates missing cleanedBytes', String(freed({ preCleanedBytes: 40 })))
+check(freed({}) === 0, 'freedBytes({}) → 0', String(freed({})))
+check(freed(null) === 0, 'freedBytes(null) → 0', String(freed(null)))
+check(freed({ cleanedBytes: 1, preCleanedBytes: 2 }) === 3, 'freedBytes is not a max', String(freed({ cleanedBytes: 1, preCleanedBytes: 2 })))
+
 // --- render smoke: TurnBadge must return null when the turn was never gated --
 const rendered = tail.component({ turn: 7, sessionId: 'session-abc', t: (k) => `t:${k}` })
 check(rendered === null, 'TurnBadge renders nothing before the stats fetch resolves')

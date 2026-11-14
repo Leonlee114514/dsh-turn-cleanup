@@ -13,12 +13,43 @@ function makeCtx(services = {}) {
     info: (m) => log.push(['info', m]),
     warn: (m) => log.push(['warn', m])
   }
-  return {
+  // 工具注册收集器：插件通过 ctx.inject(['tools'], …) 注册 report_temp_cleanup，
+  // 这里把定义存下来，测试可以直接调 definition.execute(args, exec) 走一遍真实逻辑。
+  const registeredTools = []
+  const ctx = {
     logger,
     // 可选服务探测口：插件用 ctx.get('workingDirectory') 取运行时 cwd，
     // 拿不到就退回 session.header.cwd。这里按需注入假服务。
     get(name) {
       return services[name]
+    },
+    // 与宿主 cordis 4.1.0 同形：then-only thenable，没有 catch/finally。
+    // 插件若误写 .catch() 会在这里当场炸，测试立刻红。
+    inject(wanted, callback) {
+      const sub = {
+        tools: {
+          register(definition) {
+            registeredTools.push(definition)
+            return () => {}
+          }
+        },
+        webServer: { register: () => () => {} },
+        effect(fn) {
+          const dispose = fn()
+          return () => dispose?.()
+        }
+      }
+      const out = callback(sub)
+      const fiber = { ok: true, value: out }
+      return Object.assign(Object.create(fiber), {
+        then(onFulfilled, onRejected) {
+          return Promise.resolve(out).then(onFulfilled, onRejected)
+        }
+      })
+    },
+    effect(fn) {
+      const dispose = fn()
+      return () => dispose?.()
     },
     on(evt, cb) {
       if (!listeners.has(evt)) listeners.set(evt, [])
@@ -44,6 +75,8 @@ function makeCtx(services = {}) {
       for (const cb of listeners.get(evt) ?? []) await cb(...args)
     }
   }
+  ctx.registeredTools = registeredTools
+  return ctx
 }
 
 function makeAgent(root, { origin = 'user', delegationDepth = 0, id = 'sess-1', noFollowup = false, headerCwd } = {}) {

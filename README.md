@@ -332,22 +332,57 @@ followup 把清单排到下一轮，本轮最后一步仍是汇报本身，折�
 Web 面板：
 
 - **设置页 → 收尾清场**：五张卡（已释放空间 / 拦截次数 / 报出文件数 / 已清文件数 / 依从率），
-  下面是最近拦截记录与按会话的分布表；范围可切「全部会话 / 当前会话」。
+  下面是最近记录与按会话的分布表；范围可切「全部会话 / 当前会话」。模型自己先清干净、
+  闸门没开口的那些轮次也记账（`kind: 'auto'`），所以「已释放空间」不会因为你手脚太快而停在 0。
 - **每个 turn 末尾一行徽章**：这一轮拦了什么、清没清、腾了多少。没拦过就不显示。
 
 ### 「已释放空间」是怎么量的
 
-只量**真正消失的那部分**，不量「报出去多少」。闸门拦下时给清单里的每个条目记一次
-`stat().size`（只算普通文件，目录不计），复核时确认已消失的条目才把字节数累加进
-`cleanedBytes`——也就是「这一轮确实还给磁盘的空间」。所以：
+口径是「**本轮碰过、到 turn 结束时确实不存在的文件，都算已释放**」，由两部分相加：
 
-- 报出去但模型没删的，不进 `cleanedBytes`（进 `remainingBytes`）
-- `prune` 模式自己删掉的备份，大小取**删除前**的 `lstat().size`，直接计入
-- 量不到就记 0，宁可少报不猜；旧账本（v1）没有 `sizes` 字段，读出来按 0 计，不会崩
+| 字段 | 含义 | 什么时候有 |
+| --- | --- | --- |
+| `preCleanedBytes` | 本轮写过/改过、turn 结束前就已经不在了的文件 | 模型自己 `rm -f` 删的、或主动上报的 |
+| `cleanedBytes` | 闸门报出去、复核确认消失的文件 | 模型在闸门提醒之后才删的 |
+| `pruned` | `prune` 模式插件亲手删的备份 | 取**删除前**的 `lstat().size` |
 
-体积是「打开面板的人才看」的数据，所以量它这一步放在闸门最后、只在 `stats` 打开时做，
-且一次最多量 200 个条目——`agent/turn-stopping` 是串行 await，不该为了统计在 turn 边界上
-排队几百次 `stat`。
+面板的「已释放空间」= `preCleanedBytes + cleanedBytes + pruned`。
+
+**为什么要有第一个字段**：0.5.0 只算 `cleanedBytes`，结果这张卡长期显示 0 B。不是统计坏了，
+是模型几乎总在 turn 结束前就自己删干净了 —— 闸门去 `stat` 时文件早就不在，永远没有可计入
+的字节。110 个会话、49334 次工具调用的实测数据摆在那里：清了就是清了，只是没经过闸门。
+
+**体积从哪来**（三条路，按可靠性排序）：
+
+1. **写入那一刻就量**。`fs/write-intent` / `fs/edit-intent` 在 `next()` 之后 `lstat`（新内容
+   已落盘），`fs/delete-intent` 在 `next()` **之前**量（之后文件就没了）。`state.paths` 因此
+   是 `Map<abs, bytes>` 而不是 `Set<abs>`。
+2. **模型主动上报**。`rm -f` 走子进程、不触发任何 intent，插件根本不知道那个文件存在过。
+   所以有一个 `report_temp_cleanup` 工具（见下节），让模型删完顺手报一句。
+3. **闸门自己 `stat`**。清单里还在的条目照旧量一次（只算普通文件，目录不计，一次最多 200 个）。
+
+量不到就记 0，宁可少报不猜。体积是「打开面板的人才看」的数据，所以第 3 条放在闸门最后、
+只在 `stats` 打开时做 —— `agent/turn-stopping` 是串行 await，不该为了统计在 turn 边界上排队
+几百次 `stat`。
+
+### `report_temp_cleanup` 工具
+
+模型删完临时件后调一次：
+
+```json
+{ "files": [ { "path": "scratch/run.log", "bytes": 2048 }, { "path": "probe-x.mjs" } ] }
+```
+
+返回 `{ accepted, ignored, bytes }`。规则：
+
+- `bytes` 可以省略（不知道就别猜，按 0 计）；
+- **只采信确实已经不存在的**：上报后仍 `stat` 得到的文件不计入已释放，防止虚报；
+- 闸门文案只在工具**真的注册成功**后才提它 —— 让模型去调一个不存在的工具比不给提示更糟；
+- 宿主没有 `tools` 服务时不注册、不报错，退化成「靠 `stat` 猜」。
+
+不硬 `inject: ['tools']`：那会让插件在缺该服务的 profile 里整个不加载，闸门跟着一起消失。
+也不 import `@deepseek-ai/dsh-tools`：`ctx.tools.register()` 接受裸 JSON Schema，
+`defineTool` 只是帮忙编译作者侧 DSL —— 传裸 schema 就能保持零运行时依赖。
 
 ### 依从率是怎么算的
 
@@ -372,9 +407,12 @@ GET /turn-cleanup/stats?scope=session&sid=…   # 单会话汇总
 GET /turn-cleanup/stats?sid=…&turn=…          # 单轮记录，null = 这轮没拦过
 ```
 
-汇总里有三个字节字段：`reportedBytes`（报出去的清单总共多大）、`cleanedBytes`（复核确认已
-消失的那部分，**面板的「已释放空间」就是它**）、`remainingBytes`（复核时还在的）。`bySession`
-每行带前两个，`recent[].verify` 带后两个，单轮记录带 `cleanedBytes` / `remainingBytes`。
+汇总里的字节字段：`reportedBytes`（报出去的清单总共多大）、`cleanedBytes`（复核确认已消失的
+那部分）、`preCleanedBytes`（模型在复核之前就自己清掉的）、`remainingBytes`（复核时还在的）。
+**面板的「已释放空间」= `cleanedBytes + preCleanedBytes`**（`prune` 模式删掉的备份已计入
+`cleanedBytes`）。`bySession` 每行带前三个，`recent[].verify` 带 `cleanedBytes` /
+`remainingBytes`，`recent[]` 与单轮记录还带 `kind`（`gate` = 拦过模型，`auto` = 模型自己
+清干净了、只记账没打扰）与 `preCleaned`。
 
 为什么不走 `remote.*` RPC：本插件没有 host 服务对象，注册一条 HTTP 路由比造一套
 service + RPC 契约轻得多，也不用管 relay / 远程模式的 origin 探测。
