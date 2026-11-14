@@ -129,11 +129,16 @@ async function scenario(label, { root, setup, origin, delegationDepth, files, re
   await ctx.emitPlain('session/event', agent.session, { type: 'turn/start', data: { turn: 1 } })
 
   // 模拟本 turn 的写入（真写，会刷新 mtime）
+  //
+  // 顺序照抄宿主：先 waterfall('fs/write-intent')（next 是空操作），再真正写盘，
+  // 写成功后 emit('fs/observed', target, {kind:'present'}, exec)。插件的体积就靠最后
+  // 这一步拿到 —— intent 回调里量必然量到「文件还不存在」。
   for (const f of files ?? []) {
     const abs = join(root, f)
     await mkdir(join(abs, '..'), { recursive: true })
-    await writeFile(abs, 'x')
     await ctx.emitWaterfall(intentEvent, { targetKey: abs }, { agent }, () => undefined)
+    await writeFile(abs, 'x')
+    await ctx.emitPlain('fs/observed', { targetKey: abs }, { kind: 'present' }, { agent })
   }
 
   // 只登记写入意图、不重写文件（保住 mtime 顺序，用于备份家族判定）

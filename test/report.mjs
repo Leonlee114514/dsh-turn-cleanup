@@ -108,10 +108,12 @@ check('files 是必填数组',
   const agent = makeAgent('sess-auto')
   await ctx.emitPlain('session/event', agent.session, { type: 'turn/start', data: { turn: 1 } })
 
-  // 通过 write-intent 写一个 100 字节的临时件：体积在落盘那一刻被记下
+  // 照抄宿主的真实顺序：waterfall('fs/write-intent') 的 next 是空操作 → 真正写盘 →
+  // 写成功后 emit('fs/observed', {kind:'present'})。体积只能靠最后一步拿到。
   const abs = join(cwd, 'probe-auto.mjs')
-  await writeFile(abs, 'x'.repeat(100))
   await ctx.emitWaterfall('fs/write-intent', { targetKey: abs }, { agent }, () => undefined)
+  await writeFile(abs, 'x'.repeat(100))
+  await ctx.emitPlain('fs/observed', { targetKey: abs }, { kind: 'present' }, { agent })
 
   // 模拟 rm -f：直接删，不触发任何 intent
   await rm(abs, { force: true })
@@ -230,6 +232,45 @@ check('files 是必填数组',
   check('8 无工具时文案不提 report_temp_cleanup',
     body.length > 0 && !body.includes('report_temp_cleanup'), body.slice(-160))
   await rm(abs, { force: true })
+}
+
+// ── 场景 9：体积只认 fs/observed，不认 intent ───────────────────────────────
+// 宿主里 fs/write-intent 的 next 是空操作，写盘发生在 waterfall 之后。所以 intent
+// 回调那一刻文件还不存在 —— 若在那里量体积，必然落成 0（0.6.0 线上就是这样）。
+{
+  const agent = makeAgent('sess-observed')
+  await ctx.emitPlain('session/event', agent.session, { type: 'turn/start', data: { turn: 1 } })
+
+  // A：只发 intent、不发 observed，然后删掉 → 路径进账，体积只能是 0（量不到）
+  const blind = join(cwd, 'probe-blind.mjs')
+  await ctx.emitWaterfall('fs/write-intent', { targetKey: blind }, { agent }, () => undefined)
+  await writeFile(blind, 'b'.repeat(64))
+  await rm(blind, { force: true })
+
+  // B：走完整序列 intent → 写盘 → observed，再删掉 → 体积必须是 64
+  const seen = join(cwd, 'probe-seen.mjs')
+  await ctx.emitWaterfall('fs/write-intent', { targetKey: seen }, { agent }, () => undefined)
+  await writeFile(seen, 's'.repeat(64))
+  await ctx.emitPlain('fs/observed', { targetKey: seen }, { kind: 'present' }, { agent })
+  await rm(seen, { force: true })
+
+  // C：只「读过」的文件（只有 observed、没有 intent）不能被当成本轮动过手。
+  // str_replace_editor 的 view / tool-fs 的 read 都会发 observed，形状与写入后完全一样。
+  const readOnly = join(cwd, 'probe-readonly.mjs')
+  await writeFile(readOnly, 'r'.repeat(32))
+  await ctx.emitPlain('fs/observed', { targetKey: readOnly }, { kind: 'present' }, { agent })
+
+  await ctx.emitSerial('agent/turn-stopping', { agent, turn: 1, signal: new AbortController().signal })
+  check('9 都清干净了 → 不打扰模型', agent.steered.length === 0, `steers=${agent.steered.length}`)
+  check('9 只读过的文件不算本轮写过的临时件（没被叫去删）',
+    !agent.steered.some((m) => JSON.stringify(m).includes('probe-readonly')), `steers=${agent.steered.length}`)
+
+  await ctx.emitPlain('session/event', agent.session, { type: 'turn/end', data: { turn: 1 } })
+  await new Promise((r) => setTimeout(r, 80))
+
+  const rec = await new StatsStore(statsFile).turnRecord('sess-observed', 1)
+  check('9 两个文件都进了 preCleaned', rec?.preCleaned === 2, String(rec?.preCleaned))
+  check('9 体积只来自 observed（64，不是 0）', rec?.preCleanedBytes === 64, String(rec?.preCleanedBytes))
 }
 
 // ── 场景 6：账本文件是 v3 且带 kind / preCleaned 字段 ──────────────────────

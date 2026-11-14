@@ -4,6 +4,43 @@
 每条写「为什么」而不只是「改了什么」—— 这个插件的坑大多来自 DSH 宿主的隐式约定，
 不记下来下次还会踩。
 
+## [0.6.1] - 2026-11-14
+
+0.6.0 把体积的测量点挂在 `fs/write-intent` 上，实测**永远是 0**。根因是宿主里这个
+waterfall 的 `next` 是个空操作，真正写盘发生在其后：
+
+```js
+// dsh-tool-fs 的 write 工具
+const intent = await ctx.waterfall("fs/write-intent", target, exec, () => void 0);
+outcome = await ctx.fs.writeText(target, input.content, intent, ...);   // ← 文件到这里才存在
+return mutationResult(ctx, target, outcome, exec);                      // ← 这里才 emit fs/observed
+```
+
+插件在 `await next()` 之后 `lstat`，那一刻文件还没落盘，量不到 → 记 0。`edit` 同理
+（`dsh-tool-fs` 的 `fs/edit-intent` 也是空 `next`）。只有 `fs/delete-intent` 因为传了
+`sizeBefore=true`（在 `next()` **之前**量）一直是对的。
+
+### Fixed — 体积改挂 `fs/observed`
+
+- 新增 `ctx.on('fs/observed', ...)`：宿主工具在**写入成功之后**才 emit 这个事件
+  （`dsh-tool-fs` 的 `write`/`edit` 都走 `mutationResult`；`dsh-tool-str-replace-editor`
+  写完后也发同形 payload），此时 `lstat` 才拿得到真实大小。
+- **只给「本轮已经有 intent 记过的路径」补体积**：`fs/observed` 在读文件时也会发
+  （`str_replace_editor` 的 `view`、`tool-fs` 的 `read`），payload 与写入后**完全同形**，
+  无法从事件本身区分。若无条件写入，读一个早就存在的 `probe-*.mjs` 就会被当成本轮写过的
+  临时件，下一轮闸门会叫模型去删一个它只读过的东西。intent 才是「动过手」的证据。
+- `fs/*-intent` 只记路径，体积留 `undefined`（**未知 ≠ 0 字节**）。之前把未知写成 0，
+  会让「没量到」和「确实是空文件」在账本里长得一样。
+
+### 测试
+
+- `test/sim.mjs` 与 `test/report.mjs` 的写入序列改为照抄宿主真实顺序：
+  `emitWaterfall(intent)` → `writeFile` → `emitPlain('fs/observed', {kind:'present'})`。
+- 新增场景 9：A 只发 intent 不发 observed 再删（体积只能是 0）；B 走完整序列写 64 B 再删
+  （体积必须是 64）；C 只发 observed 不发 intent（不能被当成本轮写过的临时件）。这三条
+  正是 0.6.0 线上失败的复现。
+- `npm run verify` → `57 + 27 + 43 + 31 = 158` 项全绿。
+
 ## [0.6.0] - 2026-11-14
 
 「已释放空间」这张卡从上线起就一直显示 0 B。不是统计坏了，是**量错了地方**：账本只认
@@ -32,6 +69,8 @@
 - 体积在**写入那一刻**就记下（`fs/write-intent` / `fs/edit-intent` 在 `next()` 之后量，
   `fs/delete-intent` 在 `next()` 之前量 —— 之后文件就没了），`state.paths` 从 `Set<abs>`
   升级为 `Map<abs, bytes>`。
+  **（这条在 0.6.1 被证伪：宿主的 `fs/write-intent` / `fs/edit-intent` 的 `next` 是空操作，
+  真正的写盘发生在其后，所以那时量不到体积。已改挂 `fs/observed`。）**
 - turn-stopping 分流：还在的进候选清单照旧提醒模型；**已不在的记 `preCleaned`**。
   两者都用 `preSeen` 去重，避免同一个文件既算待清又算已清。
 - 没有需要提醒的东西、但本轮确实清掉过 → 记一条 `kind: 'auto'` 的账，**不打扰模型**，

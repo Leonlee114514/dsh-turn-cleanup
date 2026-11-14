@@ -58,6 +58,9 @@ if (turnEnds && this.inbox.nextStep.length === 0) break;
 「删除」走 delete-intent（`dsh-tool-fs`、`dsh-tool-str-replace-editor` 各自 emit），只挂 write 的话
 模型用 `edit` / `str_replace` 造出来的临时件完全看不见。
 
+体积另挂 `fs/observed`（写入成功之后才发），因为 intent 的 `next` 是空操作、那一刻文件还没落盘。
+详见下面「已释放空间」那节。
+
 turn 结束时只检查**这些路径**里文件名匹配临时件特征的（`probe-*` / `tmp-*` / `scratch-*` /
 `check-*` / `check_*` / `diag_*` / `bench-*` / `bench_*` / `*.bak-*`，或位于 `.agent-tmp/`）。
 匹配对象是**文件名**（不是路径），大小写不敏感。
@@ -354,16 +357,22 @@ Web 面板：
 
 **体积从哪来**（三条路，按可靠性排序）：
 
-1. **写入那一刻就量**。`fs/write-intent` / `fs/edit-intent` 在 `next()` 之后 `lstat`（新内容
-   已落盘），`fs/delete-intent` 在 `next()` **之前**量（之后文件就没了）。`state.paths` 因此
-   是 `Map<abs, bytes>` 而不是 `Set<abs>`。
+1. **写完之后立刻量**。`fs/observed` 是宿主工具**写入成功之后**才发的事件，那时 `lstat`
+   才拿得到真实大小。`state.paths` 因此是 `Map<abs, bytes>` 而不是 `Set<abs>`。
+   （**不要挂在 `fs/write-intent` 上**：宿主里那个 waterfall 的 `next` 是空操作，真正写盘
+   发生在它之后，回调那一刻文件还不存在 —— 0.6.0 就栽在这里，量出来永远是 0。）
+   `fs/delete-intent` 例外：它在 `next()` **之前**量，因为之后文件就没了。
 2. **模型主动上报**。`rm -f` 走子进程、不触发任何 intent，插件根本不知道那个文件存在过。
    所以有一个 `report_temp_cleanup` 工具（见下节），让模型删完顺手报一句。
 3. **闸门自己 `stat`**。清单里还在的条目照旧量一次（只算普通文件，目录不计，一次最多 200 个）。
 
-量不到就记 0，宁可少报不猜。体积是「打开面板的人才看」的数据，所以第 3 条放在闸门最后、
-只在 `stats` 打开时做 —— `agent/turn-stopping` 是串行 await，不该为了统计在 turn 边界上排队
-几百次 `stat`。
+`fs/observed` 在读文件时也会发（`str_replace_editor` 的 `view`、`tool-fs` 的 `read`），
+payload 与写入后**完全同形**，所以只有「本轮已经有 intent 记过的路径」才补体积 ——
+否则读一个早就存在的 `probe-*.mjs` 会被当成本轮写过的临时件。
+
+量不到就记为「未知」（不是 0），宁可少报不猜。体积是「打开面板的人才看」的数据，所以第 3 条
+放在闸门最后、只在 `stats` 打开时做 —— `agent/turn-stopping` 是串行 await，不该为了统计在
+turn 边界上排队几百次 `stat`。
 
 ### `report_temp_cleanup` 工具
 
@@ -438,7 +447,7 @@ service + RPC 契约轻得多，也不用管 relay / 远程模式的 origin 探�
 | 0.2.2-rc.2 | 4.1.0 | ✅ 0.3.2 起 | `ctx.inject()` 变 then-only；`client-modules` 删掉 `pkgMeta` 缓存 |
 
 依赖的钩子在两个版本里语义一致：`session/event`（`turn/start` / `turn/end`）、
-`session/disposed`、`fs/write-intent` / `fs/edit-intent` / `fs/delete-intent`、
+`session/disposed`、`fs/write-intent` / `fs/edit-intent` / `fs/delete-intent`、`fs/observed`、
 `agent/turn-stopping`、`agent.steer` / `agent.followup`、`ctx.webServer.register`、`ctx.effect`、
 以及可选的 `workingDirectory` 服务（存在就用它取运行时 cwd，不存在退回 `session.header.cwd`）。
 
@@ -475,7 +484,7 @@ service + RPC 契约轻得多，也不用管 relay / 远程模式的 origin 探�
 单元测试（假 ctx 模拟 agent-loop 调用顺序，不依赖 DSH 运行时）：
 
 ```bash
-npm test        # 57 + 24 + 36 = 117 checks passed
+npm test        # 57 + 27 + 43 + 31 = 158 checks passed
 npm run verify  # syntax check + test
 ```
 
