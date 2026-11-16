@@ -4,6 +4,41 @@
 每条写「为什么」而不只是「改了什么」—— 这个插件的坑大多来自 DSH 宿主的隐式约定，
 不记下来下次还会踩。
 
+## [0.7.1] - 2026-11-16
+
+0.7.0 的通道 4 把 `tool/result` 的采集排进了异步链：
+
+```js
+s.chain = s.chain.then(() => collectTouched(ctx, session, s, found)).catch(() => {})
+```
+
+监听器本身是同步返回的（宿主 `invokeContainedSessionObservers` 只做
+`Promise.resolve(returned).catch()`，不 await），所以这句只把工作塞进微任务队列就返回了，
+**工具本体紧接着执行**。对 `rm -f x` 来说，等微任务真正跑到 `collectTouched` 时文件已经没了，
+`lstat` 抛 ENOENT，体积永久丢失。
+
+这不是理论问题：`npm test` 连跑五次得到 `17/17, 15/17, 17/17, 15/17, 17/17`，
+失败恒为场景 3（cwd 之外的删除也计入已释放）。差一次 `console.log` 的时间就能让它通过 ——
+典型的时序竞态。
+
+### Fixed
+
+- `collectTouched` 改为**全同步**：`lstat` → `statSync`，`canonicalCwd` → `canonicalCwdSync`
+  （新增，用 `realpathSync`）。函数不再是 `async`，`tool/result` 分支直接同步调用它，
+  不再经过 `s.chain`。同步调用与工具本体在同一个 tick 里，`rm` 删得再快也抢不过。
+- 删掉 `s.chain` 这个状态字段与 `turn-stopping` 里的 `await pending.chain`：
+  采集既然同步，就不存在「半截数据」，那句等待已经是空转。
+- `snapshotTouched`（0.7.0 加的 `tool/call` 同步快照）保留 —— 它负责「删除发生在本轮中间」的
+  情形，与 `collectTouched` 的「还在的文件」互补，两条路都要。
+
+代价：`tool/result` 监听器里多了几次同步 IO。清单有上界（`MAX_TOUCHED_PATHS = 200`），
+且只在模型真的调了工具时触发，实测无感。
+
+### 验证
+
+`test/tool-agnostic.mjs` 连跑 20 次全部 17/17；`npm run verify` 连跑 3 轮全部
+`57 + 27 + 43 + 31 + 17 = 175` 全绿。
+
 ## [0.7.0] - 2026-11-16
 
 0.6.x 的采集全靠 `fs/*-intent`。这套钩子**只有 `dsh-tool-fs` 与 `dsh-tool-str-replace-editor`
