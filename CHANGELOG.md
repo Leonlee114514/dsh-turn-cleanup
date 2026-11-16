@@ -4,6 +4,54 @@
 每条写「为什么」而不只是「改了什么」—— 这个插件的坑大多来自 DSH 宿主的隐式约定，
 不记下来下次还会踩。
 
+## [0.7.0] - 2026-11-16
+
+0.6.x 的采集全靠 `fs/*-intent`。这套钩子**只有 `dsh-tool-fs` 与 `dsh-tool-str-replace-editor`
+会发** —— `dsh-ops` 一条都不发（`ops_write_file` / `ops_bash` 直接走它自己的执行层），
+第三方插件、用户自己写的工具更不会有。真实会话里 `ops_write_file` 的出现次数与 `write`
+相当，于是「清了临时文件但面板没变化」成了常态：
+
+```
+session-77f00ae4 turn 2:  cd "$TEMP" && rm -f hydra.out repairpatch.js
+```
+
+这两个文件既在 cwd 之外、名字也不符合临时件模式，两条老通道都看不见。
+
+### Added — 通道 4：与工具无关的采集
+
+不认工具名、不认参数键名，只认 `session/event` 里的 `tool/call` + `tool/result`。
+宿主对**每个**已提交事件都同步派发 `(session, event)`（`collectSessionCallbacks` →
+`invokeContainedSessionObservers`），这是唯一不依赖具体工具实现的立足点。
+
+- `tool/call` 时把实参里所有像路径的字符串捞出来：递归扫值、跳过 `content` / `text` /
+  `patch` 之类的正文键；命令串按 `[\s;&|()<>]+` 切开，并跟踪 `cd` / `pushd` 换基准目录
+  （用户自己的清理脚本几乎总是 `cd <目标目录> && rm -f <相对名>`）。
+- `tool/result` 时对每个候选 `lstat`，**mtime 在本轮开始之后的**才算「本轮碰过」。
+  读文件不改 mtime，写文件一定改 —— 这条判据把 `read` / `grep` / `glob` 顺手扫到的老文件
+  全挡在外面，不需要知道调用的是哪个工具。容差 1 秒防 mtime 精度与时钟回拨的假阴性。
+- 分两本账：`s.paths`（cwd 内 + mtime 是本轮的）进 steer 清单；`s.foreign`（cwd 之外）
+  只记账、**永不进 steer 清单** —— 工作区之外的东西不该由插件指挥模型去删，但删掉了多少
+  空间照样该算。
+
+### Fixed — 「写完又立刻删」的体积丢失（真实竞态）
+
+`tool/call` 那一刻必须**同步**拍一次体积快照，`statSync` 而不是 `await lstat`。
+宿主的 `invokeContainedSessionObservers` 只做 `Promise.resolve(returned).catch()`，
+**不 await 监听器**，工具本体在监听器返回后立刻执行；`rm -f x` 从发起到删完只有几毫秒，
+任何 `await` 都会让快照落在删除之后。这条正是 `test/tool-agnostic.mjs` 场景 3/5
+「加一行 `console.log` 就从 FAIL 变 PASS」的原因 —— 不是测试不稳，是产品有竞态。
+
+快照进 `s.touched`，只用于记账，**不进 steer 清单**：这里没有 mtime 过滤，`read` 顺手
+看一眼老临时件也会被拍进来，拿它指挥模型删文件就会误伤。
+
+### 测试
+
+新增 `test/tool-agnostic.mjs`（17 项），覆盖：不发 intent 的写入被记账、只读老文件不被
+叫去删也不计入、cwd 之外的删除计入已释放但不打扰模型、不发 intent 的残留照样拦、
+命令串里 `cd` + `rm -f` 的多个文件都记到且字节合计正确、实参被截断时不抛。
+
+`npm run verify` → `57 + 27 + 43 + 31 + 17 = 175` 全绿。
+
 ## [0.6.1] - 2026-11-14
 
 0.6.0 把体积的测量点挂在 `fs/write-intent` 上，实测**永远是 0**。根因是宿主里这个

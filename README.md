@@ -43,7 +43,7 @@ if (turnEnds && this.inbox.nextStep.length === 0) break;
 
 ---
 
-## 检出范围：三个通道，各自独立判定
+## 检出范围：四条通道，各自独立判定
 
 ### 通道 1 — 约定目录（主机制，零误伤）
 
@@ -60,6 +60,10 @@ if (turnEnds && this.inbox.nextStep.length === 0) break;
 
 体积另挂 `fs/observed`（写入成功之后才发），因为 intent 的 `next` 是空操作、那一刻文件还没落盘。
 详见下面「已释放空间」那节。
+
+**但通道 2 只看得见两个宿主工具。** `fs/*-intent` 是 `dsh-tool-fs` 与
+`dsh-tool-str-replace-editor` 自己 emit 的，`dsh-ops` 一条都不发（`ops_write_file` / `ops_bash`
+走它自己的执行层），第三方插件更不会有。所以还有一条不认工具名的通道 4 兜底。
 
 turn 结束时只检查**这些路径**里文件名匹配临时件特征的（`probe-*` / `tmp-*` / `scratch-*` /
 `check-*` / `check_*` / `diag_*` / `bench-*` / `bench_*` / `*.bak-*`，或位于 `.agent-tmp/`）。
@@ -105,9 +109,39 @@ turn 结束时只检查**这些路径**里文件名匹配临时件特征的（`p
 反过来原件比备份旧往往意味着模型反复备份却没改原件 —— 那正是要清的重复副本。而且
 删的永远是最旧的那几份，最新 `keep` 份一律不动，价值损失有上界。
 
+### 通道 4 — 与工具无关的采集（谁写的都算）
+
+通道 2 靠 `fs/*-intent`，而**只有 `dsh-tool-fs` 与 `dsh-tool-str-replace-editor` 会发这两个事件**。
+`dsh-ops` 一条都不发 —— 它的 `ops_write_file` / `ops_bash` 直接走自己的执行层；第三方插件、
+用户自己写的工具更不会有。真实会话里 `ops_write_file` 的出现次数和 `write` 差不多，光靠通道 2
+会漏掉一半。
+
+通道 4 不认工具名、不认参数键名，只认 `session/event` 里的 `tool/call` + `tool/result`：
+
+1. `tool/call` 时把实参里所有像路径的字符串捞出来（递归扫值，跳过 `content` / `text` /
+   `patch` 之类的正文键；命令串按空白切开并跟踪 `cd` / `pushd` 换基准目录）。
+2. `tool/result` 时对每个候选 `lstat`，**mtime 在本轮开始之后的**才算「本轮碰过」——
+   读文件不改 mtime，写文件一定改。这条判据把 `read` / `grep` / `glob` 顺手扫到的老文件
+   全挡在外面，不需要知道调用的是哪个工具。
+3. **`tool/call` 那一刻还要同步拍一次体积**。宿主的 `invokeContainedSessionObservers` 不
+   `await` 监听器，工具本体紧接着就执行；`rm -f x` 从发起到删完只有几毫秒，任何 `await`
+   都会让快照落在删除之后。这次快照只用于「已释放空间」记账，不进 steer 清单
+   （没有 mtime 过滤，`read` 顺手看一眼老临时件也会被拍进来）。
+
+分两本账：
+
+| 账 | 范围 | 用途 |
+| --- | --- | --- |
+| `s.paths` | cwd 内 + mtime 是本轮的 | 进 steer 清单（可能叫模型去删） |
+| `s.foreign` | cwd 之外（`%TEMP%`、`~/.cache`、别的盘） | 只记账，**永不进 steer 清单** |
+
+工作区之外的东西不该由插件指挥模型去删，但删掉了多少空间照样该算 —— 用户自己的清理脚本
+（`cd "$TEMP" && rm -f ...`）清的就是这一类，它们既不在 cwd 内、名字也常常不符合模式，
+两条老通道都看不见。
+
 ### 明确不做
 
-- **通道 1 / 2 永远不删任何文件** —— 只 steer，删不删、留不留由模型判断（交付物、用户文件、
+- **通道 1 / 2 / 4 永远不删任何文件** —— 只 steer，删不删、留不留由模型判断（交付物、用户文件、
   `.git`、`node_modules`、`out/`、`dist/`、`build/` 等保护段一律不碰）。只有通道 3 的 `prune` 模式会删，
   且只删备份副本，四道闸见上。
 - **不做 `git status` 兜底** —— 大仓库慢，且存量未跟踪文件极多，容易误判。
@@ -345,7 +379,7 @@ Web 面板：
 
 | 字段 | 含义 | 什么时候有 |
 | --- | --- | --- |
-| `preCleanedBytes` | 本轮写过/改过、turn 结束前就已经不在了的文件 | 模型自己 `rm -f` 删的、或主动上报的 |
+| `preCleanedBytes` | 本轮碰过、turn 结束前就已经不在了的文件 | 模型自己 `rm -f` 删的、或主动上报的；含 cwd 之外 |
 | `cleanedBytes` | 闸门报出去、复核确认消失的文件 | 模型在闸门提醒之后才删的 |
 | `pruned` | `prune` 模式插件亲手删的备份 | 取**删除前**的 `lstat().size` |
 
@@ -355,16 +389,20 @@ Web 面板：
 是模型几乎总在 turn 结束前就自己删干净了 —— 闸门去 `stat` 时文件早就不在，永远没有可计入
 的字节。110 个会话、49334 次工具调用的实测数据摆在那里：清了就是清了，只是没经过闸门。
 
-**体积从哪来**（三条路，按可靠性排序）：
+**体积从哪来**（四条路，按可靠性排序）：
 
 1. **写完之后立刻量**。`fs/observed` 是宿主工具**写入成功之后**才发的事件，那时 `lstat`
    才拿得到真实大小。`state.paths` 因此是 `Map<abs, bytes>` 而不是 `Set<abs>`。
    （**不要挂在 `fs/write-intent` 上**：宿主里那个 waterfall 的 `next` 是空操作，真正写盘
    发生在它之后，回调那一刻文件还不存在 —— 0.6.0 就栽在这里，量出来永远是 0。）
    `fs/delete-intent` 例外：它在 `next()` **之前**量，因为之后文件就没了。
-2. **模型主动上报**。`rm -f` 走子进程、不触发任何 intent，插件根本不知道那个文件存在过。
+2. **`tool/call` 那一刻同步拍快照**（通道 4）。这条路专治「不经过 `fs/*-intent` 的工具」
+   和「写完又立刻删」：宿主的 `invokeContainedSessionObservers` 不 `await` 监听器，工具本体
+   紧接着就执行，`rm -f x` 从发起到删完只有几毫秒 —— 任何 `await` 都会让快照落在删除之后。
+   所以 `snapshotTouched()` 用 `statSync` 全同步拍，结果进 `s.touched`（只记账，不进 steer 清单）。
+3. **模型主动上报**。`rm -f` 走子进程、不触发任何 intent，插件根本不知道那个文件存在过。
    所以有一个 `report_temp_cleanup` 工具（见下节），让模型删完顺手报一句。
-3. **闸门自己 `stat`**。清单里还在的条目照旧量一次（只算普通文件，目录不计，一次最多 200 个）。
+4. **闸门自己 `stat`**。清单里还在的条目照旧量一次（只算普通文件，目录不计，一次最多 200 个）。
 
 `fs/observed` 在读文件时也会发（`str_replace_editor` 的 `view`、`tool-fs` 的 `read`），
 payload 与写入后**完全同形**，所以只有「本轮已经有 intent 记过的路径」才补体积 ——
@@ -446,10 +484,15 @@ service + RPC 契约轻得多，也不用管 relay / 远程模式的 origin 探�
 | 0.2.1-rc.5 | 4.0.5 | ✅ | 基线 |
 | 0.2.2-rc.2 | 4.1.0 | ✅ 0.3.2 起 | `ctx.inject()` 变 then-only；`client-modules` 删掉 `pkgMeta` 缓存 |
 
-依赖的钩子在两个版本里语义一致：`session/event`（`turn/start` / `turn/end`）、
-`session/disposed`、`fs/write-intent` / `fs/edit-intent` / `fs/delete-intent`、`fs/observed`、
-`agent/turn-stopping`、`agent.steer` / `agent.followup`、`ctx.webServer.register`、`ctx.effect`、
-以及可选的 `workingDirectory` 服务（存在就用它取运行时 cwd，不存在退回 `session.header.cwd`）。
+依赖的钩子在两个版本里语义一致：`session/event`（`turn/start` / `turn/end` / `tool/call` /
+`tool/result`）、`session/disposed`、`fs/write-intent` / `fs/edit-intent` / `fs/delete-intent`、
+`fs/observed`、`agent/turn-stopping`、`agent.steer` / `agent.followup`、`ctx.webServer.register`、
+`ctx.effect`、以及可选的 `workingDirectory` 服务（存在就用它取运行时 cwd，不存在退回
+`session.header.cwd`）。
+
+`session/event` 是通道 4 的立足点：宿主对**每个**已提交事件都同步派发
+`(session, event)` 给所有监听器（`collectSessionCallbacks` → `invokeContainedSessionObservers`），
+`tool/call` / `tool/result` 也在其中，所以不必依赖任何具体工具的实现。
 
 客户端 half 声明了 `dsh.client.inject: ["@deepseek-ai/dsh-client-ui-chat",
 "@deepseek-ai/dsh-client-ui-settings-general"]` —— 它注册的 `conversation.chat.turnTail` 与
@@ -484,14 +527,14 @@ service + RPC 契约轻得多，也不用管 relay / 远程模式的 origin 探�
 单元测试（假 ctx 模拟 agent-loop 调用顺序，不依赖 DSH 运行时）：
 
 ```bash
-npm test        # 57 + 27 + 43 + 31 = 158 checks passed
+npm test        # 57 + 27 + 43 + 31 + 17 = 175 checks passed
 npm run verify  # syntax check + test
 ```
 
-三份测试各管一段：`test/sim.mjs` 驱动闸门与三个通道（57 项）、`test/web.mjs` 驱动
+五份测试各管一段：`test/sim.mjs` 驱动闸门与通道 1/2/3（57 项）、`test/web.mjs` 驱动
 StatsStore 与 `/turn-cleanup/stats` 端点、体积字段、以及 then-only 的 `ctx.inject` 假实现
 （24 项）、`test/client.mjs` 用假 `window.__ModuleLoader__` 加载真实 client bundle、断言 slot
-注册形状、locale 字典与 `fmtBytes` 进位（36 项）。三份都在 CI 里跑（ubuntu × node 20/22/24，
+注册形状、locale 字典与 `fmtBytes` 进位（36 项）、`test/report.mjs` 覆盖 `report_temp_cleanup` 上报链路与 `fs/observed` 体积（31 项）、`test/tool-agnostic.mjs` 覆盖通道 4 的不认工具名采集（17 项）。五份都在 CI 里跑（ubuntu × node 20/22/24，
 加 windows/macos）。
 
 `test/sim.mjs` 里有几项是**可移植性回归**，专门锁住「本机能跑、别人机器上误伤/漏报」的坑：
