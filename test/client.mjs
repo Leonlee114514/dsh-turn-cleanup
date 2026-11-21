@@ -40,6 +40,15 @@ function fakeReact() {
   }
 }
 
+/** Flatten a rendered tree to its text nodes — enough to assert on cell contents. */
+function flatten(node) {
+  if (node === null || node === undefined || node === false) return []
+  if (typeof node === 'string' || typeof node === 'number') return [String(node)]
+  if (Array.isArray(node)) return node.flatMap(flatten)
+  if (typeof node === 'object') return flatten(node.children)
+  return []
+}
+
 /** Fake loader capture: the bundle calls window.__ModuleLoader__.load({id, factory}). */
 let loaded = null
 globalThis.window = {
@@ -188,6 +197,43 @@ check(freed({ preCleanedBytes: 40 }) === 40, 'freedBytes tolerates missing clean
 check(freed({}) === 0, 'freedBytes({}) → 0', String(freed({})))
 check(freed(null) === 0, 'freedBytes(null) → 0', String(freed(null)))
 check(freed({ cleanedBytes: 1, preCleanedBytes: 2 }) === 3, 'freedBytes is not a max', String(freed({ cleanedBytes: 1, preCleanedBytes: 2 })))
+
+// --- recent 表: 字节必须取整行, 不能取 verify 子对象 ---------------------------
+// 模型几乎总在复核前就自己 rm 掉了, 所以 verify 里只剩 cleaned=0/remaining=0,
+// 真正的字节全在行顶层的 preCleanedBytes。早先这里把 freedBytes(r.verify) 拼在
+// 复核列后面, 于是每一行都显示「已清 0 / 仍在 0」——卡片有数字、这张表没有。
+check(typeof plugin.RecentTable === 'function', 'exports RecentTable for the recent-table contract')
+const RecentTable = plugin.RecentTable ?? (() => null)
+const recentRow = {
+  at: '2026-11-19T17:01:44.363Z',
+  turn: 21,
+  sid: 'session-bfdc2247-0000-0000-0000-000000000000',
+  temps: 0,
+  backups: 0,
+  preCleaned: 23,
+  preCleanedBytes: 105953,
+  cleanedBytes: 0,
+  verify: { cleaned: 0, remaining: 0, cleanedBytes: 0, remainingBytes: 0 }
+}
+const recentText = flatten(RecentTable({ stats: { recent: [recentRow] }, t: (k) => `t:${k}` })).join(' | ')
+check(
+  recentText.includes(bytes(105953)),
+  'recent 行把 preCleanedBytes 显示成释放体积（不只 cleanedBytes）',
+  recentText
+)
+check(
+  recentText.includes('t:resultCleaned 0 / t:resultRemaining 0'),
+  'recent 行的复核列仍如实显示 已清 0 / 仍在 0',
+  recentText
+)
+const pendingText = flatten(
+  RecentTable({ stats: { recent: [{ ...recentRow, verify: null }] }, t: (k) => `t:${k}` })
+).join(' | ')
+check(
+  pendingText.includes('t:resultPending') && pendingText.includes(bytes(105953)),
+  '待复核的行同样带出释放体积（数据已落账，只是还没 stat）',
+  pendingText
+)
 
 // --- render smoke: TurnBadge must return null when the turn was never gated --
 const rendered = tail.component({ turn: 7, sessionId: 'session-abc', t: (k) => `t:${k}` })
