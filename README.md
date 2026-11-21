@@ -543,14 +543,17 @@ service + RPC 契约轻得多，也不用管 relay / 远程模式的 origin 探�
 单元测试（假 ctx 模拟 agent-loop 调用顺序，不依赖 DSH 运行时）：
 
 ```bash
-npm test        # 57 + 27 + 43 + 31 + 17 = 175 checks passed
+npm test        # 57 + 31 + 47 + 31 + 17 = 183 checks passed
 npm run verify  # syntax check + test
 ```
 
 五份测试各管一段：`test/sim.mjs` 驱动闸门与通道 1/2/3（57 项）、`test/web.mjs` 驱动
-StatsStore 与 `/turn-cleanup/stats` 端点、体积字段、以及 then-only 的 `ctx.inject` 假实现
-（24 项）、`test/client.mjs` 用假 `window.__ModuleLoader__` 加载真实 client bundle、断言 slot
-注册形状、locale 字典与 `fmtBytes` 进位（36 项）、`test/report.mjs` 覆盖 `report_temp_cleanup` 上报链路与 `fs/observed` 体积（31 项）、`test/tool-agnostic.mjs` 覆盖通道 4 的不认工具名采集（17 项）。五份都在 CI 里跑（ubuntu × node 20/22/24，
+StatsStore 与 `/turn-cleanup/stats` 端点、体积字段、then-only 的 `ctx.inject` 假实现，
+以及「服务尚未 ACTIVE、`ctx.get` 恒 undefined」的冷启动现场（31 项）、`test/client.mjs` 用假
+`window.__ModuleLoader__` 加载真实 client bundle、断言 slot 注册形状、locale 字典、
+`fmtBytes` 进位与 recent 行的释放体积渲染（47 项）、`test/report.mjs` 覆盖
+`report_temp_cleanup` 上报链路与 `fs/observed` 体积（31 项）、`test/tool-agnostic.mjs`
+覆盖通道 4 的不认工具名采集（17 项）。五份都在 CI 里跑（ubuntu × node 20/22/24，
 加 windows/macos）。
 
 `test/sim.mjs` 里有几项是**可移植性回归**，专门锁住「本机能跑、别人机器上误伤/漏报」的坑：
@@ -561,7 +564,7 @@ StatsStore 与 `/turn-cleanup/stats` 端点、体积字段、以及 then-only �
 
 ---
 
-## 八个真机踩到的坑
+## 九个真机踩到的坑
 
 **1. 配置归一化把裸前导点削掉**
 
@@ -609,8 +612,9 @@ sub.effect(() => {
 救不回来。先装插件、后补 `dsh.client` 的情况会永久记成「没有 client 半」。
 
 插件在 `apply` 里自己做一次兜底：清掉**本包自己**那条 `null` 缓存、标 dirty、手动
-`flush()` 一次。日志里会有一行 `client entry recovered url=…`。拿不到内部字段就安静放弃，
-退化成「重启 DSH 才出现面板」——那本来也是正常安装路径。
+`flush()` 一次。日志里会有一行 `client entry recovered url=…`。（这段兜底原先用
+`ctx.get('clientModules')` 同步探测服务，冷启动时恒拿到 `undefined`，见坑 9；现在改成
+`ctx.inject(['clientModules'], …)`，等 service ACTIVE 才进来干活。）
 
 **7. steer 会把交付汇报折进「过程」**
 
@@ -657,6 +661,67 @@ try {
 `resolveMeta()` 每次 flush 都重新读 `package.json`。所以坑 6 的兜底不再能靠
 「清掉那条 null 缓存」判断要不要干活——现在的写法是「有 `pkgMeta` 就清（老版本需要，
 新版本自然是空集合），然后统一 `dirty.add(name)` + `flush()`」。
+
+**9. `ctx.get(name)` 默认只认已经 ACTIVE 的服务，冷启动恒 undefined**
+
+`apply` 里同步探测服务，看着安全，实际在冷启动时永远失败。
+
+cordis 4.1.0 把 `ReflectService.get` mixin 到了 ctx 上，所以 `ctx.get(name)` 就是
+`ctx.reflect.get(name, strict = true)`：
+
+```js
+// cordis/lib/index.js:1347-1356
+get(name, strict = true) {
+  return getTraceable(this.ctx, this._getImpl(name, strict)?.value)
+}
+_getImpl(name, strict) {
+  const key = this.ctx[symbols.isolate][name]
+  const impl = key && this.store[key]
+  if (!impl) return
+  if (strict && impl.ctx.fiber.state !== 2) return   // ← 不是 ACTIVE 就当没有
+  return impl
+}
+```
+
+`state === 2` 的条件是 `fiber._runner.epoch !== INACTIVE`（`cordis/lib/index.js:585`），
+也就是**提供者自己的插件 callback 已经跑完**。本插件随 profile 一起装，`apply` 一定
+早于 `clientModules` 那个 fiber 走到 2，于是 `ctx.get('clientModules')` 拿到 `undefined`——
+哪怕服务早就 `provide` 好了、value 就在 store 里。
+
+实测（真 cordis 4.1.0，慢装作提供者）：
+
+```
+slow: provided; fiber.state=1
+get 写法 -> undefined (=absent 分支)
+  此刻 provider fiber.state=1
+inject 写法 -> 拿到服务=true; provider state=2
+```
+
+症状之所以难抓：日志里 40+ 行 `client entry check: clientModules service absent`，偶尔
+又有几次 `client entry present`。那几次不是服务突然回来了，是 HMR 重跑 `apply`——
+重跑时 `clientModules` 早就 ACTIVE。
+
+正确写法是可选注入，让 cordis 负责等：
+
+```js
+if (typeof ctx.inject === 'function') {
+  try {
+    const fiber = ctx.inject(['clientModules'], (sub) => { recoverClientEntry(sub.clientModules) })
+    if (typeof fiber?.then === 'function') fiber.then(undefined, onInjectError)
+  } catch (error) {
+    onInjectError(error)
+  }
+}
+```
+
+子 fiber 的依赖不满足只让它自己不加载，闸门本体不受影响；服务缺席的 profile 里也不会
+整块消失。**同一个坑在 `tools` 上也踩过**：原来的
+`if (ctx.get('tools') !== void 0) { …注册 report_temp_cleanup… }` 在冷启动恒 false，
+上报工具静默不注册（日志印证：46 次 `apply` 只配到 2 次 `report`）。两处都已改成
+「只判 `typeof ctx.inject === 'function'`，交给 inject 等」。
+
+`strict = false` 也能读（`ctx.reflect.get(name, false)`），但它会在 value 还没填好时
+返回半成品，且官方 `dsh-client-hmr` 走的是硬 `inject` 路线，这里跟着官方写。
 
 ---
 

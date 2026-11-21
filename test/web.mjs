@@ -22,6 +22,8 @@ const logFile = join(root, 'logs', 'cleanup.log')
 
 const listeners = new Map()
 const routes = []
+const injected = []
+let cmFlushed = 0
 const ctx = {
   logger: { info() {}, warn() {} },
   on(evt, cb) {
@@ -33,19 +35,37 @@ const ctx = {
     return () => dispose?.()
   },
   inject(services, callback) {
-    check('inject 请求了 webServer', services.includes('webServer'), services.join(','))
+    injected.push([...services])
     const sub = {
-      webServer: {
-        register(route) {
-          routes.push(route)
-          return () => {}
-        }
-      },
+      webServer: services.includes('webServer')
+        ? {
+            register(route) {
+              routes.push(route)
+              return () => {}
+            }
+          }
+        : undefined,
+      clientModules: services.includes('clientModules')
+        ? {
+            graph: () => ({ entries: [] }),
+            dirty: new Set(),
+            // 真的把本包收进 graph：记录「自救成功」这条路也跑一遍。
+            flush(onError) {
+              cmFlushed += 1
+              this.entries = [{ id: 'dsh-turn-cleanup', url: 'plugins/??dsh-turn-cleanup/client.js&rev=fedcba987654' }]
+              onError?.(null)
+            },
+            entries: []
+          }
+        : undefined,
+      tools: services.includes('tools') ? { register() { return () => {} } } : undefined,
       effect(fn) {
         const dispose = fn()
         return () => dispose?.()
       }
     }
+    // clientModules 桩的 graph 要读得到 flush 后写进去的 entries。
+    if (sub.clientModules) sub.clientModules.graph = () => ({ entries: sub.clientModules.entries })
     const out = callback(sub)
     // cordis 4.1.0 的 ctx.inject() 返回 Object.create(fiber) 再挂一个 then 的 thenable：
     // 有 then，没有 catch / finally。这里照抄这个形状——插件的 apply 一旦误写 .catch()，
@@ -86,6 +106,17 @@ check('apply 在 then-only thenable 下不抛', applyError === null,
 check('注册了 /turn-cleanup/stats 路由', routes.length === 1 && routes[0].path === '/turn-cleanup/stats',
   routes.map((r) => `${r.kind}:${r.path}`).join(','))
 check('路由是 exact', routes[0]?.kind === 'exact', String(routes[0]?.kind))
+
+// 冷启动自救：apply 时 clientModules 的 fiber 还没 ACTIVE（reflect.get strict 返回 undefined），
+// 所以 apply 必须走 ctx.inject 等它就绪，而不是同步 ctx.get 一下就放弃。
+// 这三条断言的靶子就是日志里 40+ 行 `client entry check: clientModules service absent`。
+check('inject 请求了 webServer', injected.some((s) => s.includes('webServer')),
+  JSON.stringify(injected))
+check('inject 请求了 clientModules（不靠 ctx.get 同步探测）',
+  injected.some((s) => s.includes('clientModules')), JSON.stringify(injected))
+check('inject 请求了 tools（不靠 ctx.get 同步探测）',
+  injected.some((s) => s.includes('tools')), JSON.stringify(injected))
+check('clientModules 就绪后真的 dirty+flush 一次', cmFlushed === 1, `flushed=${cmFlushed}`)
 
 const session = { id: 'sess-web-1', header: { cwd, origin: 'user', delegationDepth: 0 } }
 const agent = { session, status: 'running', steered: [], steer(m) { this.steered.push(m) } }
@@ -188,39 +219,59 @@ const badScope = await callRoute('/turn-cleanup/stats?scope=session')
 check('session 但无 sid → 退回汇总', badScope.json.scope === 'all', badScope.json.scope)
 
 // 统计关闭时不该注册路由
+const injects2 = []
 const ctx2 = {
   logger: { info() {}, warn() {} },
   on() {},
   effect(fn) { fn() },
-  inject() { throw new Error('should not inject when stats=false') }
+  inject(services) {
+    injects2.push([...services])
+    // 没有服务可用：模拟最精简 profile（连 tools / clientModules 都不在）。
+    return { then(_, onRejected) { onRejected?.(new Error('no such service')) } }
+  }
 }
 apply(ctx2, { enabled: true, stats: false })
-check('stats:false 时不碰 webServer', true, 'no inject call')
+check('stats:false 时不碰 webServer', !injects2.some((s) => s.includes('webServer')),
+  JSON.stringify(injects2))
 
-// 0.2.2 的 clientModules 没有 pkgMeta 缓存，只剩 dirty + flush。
-// 自救逻辑必须在这套形状下也真的 flush 一次，而不是直接 return。
-const cmState = { entries: [], dirty: new Set(), flushed: 0 }
+// 冷启动形状（就是日志里 40+ 次 absent 的那个现场）：
+// clientModules 服务早就 provide 了，但提供它的 fiber 还没 ACTIVE，
+// 于是 `ctx.get('clientModules')`（= reflect.get strict=true，cordis/lib/index.js:1347-1356）
+// 返回 undefined。自救必须走 `ctx.inject(['clientModules'], …)` 等它就绪，
+// 而不是同步探一下就 record('clientModules service absent') 然后放弃。
+// 这个桩故意**不提供** get()，谁再退回去用 ctx.get 就会当场红。
+const cmState = { entries: [], dirty: new Set(), flushed: 0, getCalls: 0 }
+const stubClientModules = {
+  graph: () => ({ entries: cmState.entries }),
+  dirty: cmState.dirty,
+  flush(onError) {
+    cmState.flushed += 1
+    cmState.entries = [{ id: 'dsh-turn-cleanup', url: 'plugins/??dsh-turn-cleanup/client.js&rev=abc123456789' }]
+    onError?.(null)
+  }
+}
 const ctx3 = {
   logger: { info() {}, warn() {} },
   on() {},
   effect(fn) { fn() },
-  inject() { return { then() {} } },
   get(service) {
-    if (service !== 'clientModules') return undefined
-    return {
-      graph: () => ({ entries: cmState.entries }),
-      dirty: cmState.dirty,
-      flush(onError) {
-        cmState.flushed += 1
-        cmState.entries = [{ id: 'dsh-turn-cleanup', url: 'plugins/??dsh-turn-cleanup/client.js&rev=abc123456789' }]
-        onError?.(null)
-      }
-    }
+    cmState.getCalls += 1
+    // 模拟「服务已 provide 但 fiber 未 ACTIVE」——strict 语义下就是 undefined。
+    return undefined
+  },
+  inject(services, callback) {
+    const sub = { effect(fn) { fn() } }
+    if (services.includes('clientModules')) sub.clientModules = stubClientModules
+    if (services.includes('tools')) sub.tools = { register() { return () => {} } }
+    callback(sub)
+    return { then() {} }
   }
 }
 apply(ctx3, { enabled: true, stats: false })
 check('0.2.2 无 pkgMeta 时仍会 dirty+flush', cmState.flushed === 1 && cmState.dirty.has('dsh-turn-cleanup'),
   `flushed=${cmState.flushed} dirty=${[...cmState.dirty].join(',')}`)
+check('服务未 ACTIVE 时不靠 ctx.get 下结论（走 inject 等就绪）',
+  cmState.flushed === 1, `flushed=${cmState.flushed} getCalls=${cmState.getCalls}`)
 
 await rm(root, { recursive: true, force: true })
 
