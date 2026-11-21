@@ -474,7 +474,7 @@ GET /turn-cleanup/stats?sid=…&turn=…          # 单轮记录，null = 这轮
 `verify` 只装复核那一刻的 `{ cleaned, remaining, cleanedBytes, remainingBytes }`。
 面板里算「已释放」时必须把**整行**喂给 `freedBytes(row)`，喂 `row.verify` 会让「最近记录」
 那一列在模型自己先清干净的轮次上恒显示 0 —— 而这恰恰是最常见的情形
-（`cleanedBytes` 只统计闸门报出去、之后才消失的文件）。0.7.1 之前就是错的，现在
+（`cleanedBytes` 只统计闸门报出去、之后才消失的文件）。0.7.2 之前就是错的，现在
 「复核」只留「已清 N / 仍在 M」，「释放」是独立一列。
 
 为什么不走 `remote.*` RPC：本插件没有 host 服务对象，注册一条 HTTP 路由比造一套

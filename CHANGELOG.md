@@ -4,6 +4,43 @@
 每条写「为什么」而不只是「改了什么」—— 这个插件的坑大多来自 DSH 宿主的隐式约定，
 不记下来下次还会踩。
 
+## [0.7.2] - 2026-11-21
+
+两个都是「数据对、界面不对」和「代码在、时机不对」的错，共同点是**测试把要验证的前提
+自己写死了**。
+
+### Fixed
+
+- 「最近记录」的释放体积恒显示 0。`recent[]` 每行是
+  `{ at, kind, turn, sid, preCleaned, preCleanedBytes, cleanedBytes, verify }`，
+  `preCleanedBytes` 在**行顶层**；`verify` 只装复核那一刻的
+  `{ cleaned, remaining, cleanedBytes, remainingBytes }`。面板里那句
+  `freedBytes(r.verify)` 读的是没有该字段的子对象，于是永远 0。这不是某个会话的
+  个别现象：本机账本 recent 20 行全部如此，最大一行 `preCleanedBytes = 241948873`。
+  而模型手脚越快、复核时文件早已不在，就越是必然命中——会话 bfdc2247 turn 21 那
+  105953 B 就是这样被吞的（后端三个端点全返回它）。现在「复核」列只留
+  「已清 N / 仍在 M」，新增独立「释放」列喂整行；导出 `RecentTable` 供测试直接渲染。
+- client 半边没进 boot graph，面板永远是旧代码。日志里 40+ 行
+  `client entry check: clientModules service absent` 横跨 11-11 到 11-21，中间只夹着
+  6 次 present。服务一直都在、`/plugins` 路由也一直挂着（非 GET 拿 405，404 来自
+  responses 表里没有那条 URL）。根因是 cordis 4.1.0 的 `ctx.get(name)` 就是
+  `ctx.reflect.get(name, strict = true)`，而 `_getImpl` 里
+  `if (strict && impl.ctx.fiber.state !== 2) return` —— **只返回提供者 fiber 已 ACTIVE
+  的实现**，value 早就 provide 了也照样 undefined。本插件随 profile 装，`apply`
+  必定早于 clientModules 走到 state 2，所以冷启动恒 absent；偶发那几次 present 是
+  HMR 重跑 apply（那时已 ACTIVE）。改 `ctx.inject(['clientModules'], (sub) => …)`
+  等就绪再干活，子 fiber 依赖不满足只让它自己不加载，闸门本体不受影响。
+- 同一个坑还吃掉了上报工具：`if (ctx.get('tools') !== void 0)` 冷启动恒 false →
+  `report_temp_cleanup` 静默不注册（日志 46 次 `apply` 只配到 2 次 `report`）。
+  两处都改成只判 `typeof ctx.inject === 'function'`，交给 inject 等。
+
+### 为什么测试没拦住
+
+`test/client.mjs` 只测纯函数 `freedBytes`，不看渲染树；`test/web.mjs` 的假 ctx 只桩了
+`get()` 且**永远返回完整服务**，等于把「服务随时可读」这个被测前提写死了。现在补
+`flatten()` 摊平渲染树做体积断言，另加冷启动现场 `ctx3`：`get()` 故意恒返回
+`undefined`（模拟已 provide 但未 ACTIVE），断言那时仍会 dirty + flush 一次。
+
 ## [0.7.1] - 2026-11-16
 
 0.7.0 的通道 4 把 `tool/result` 的采集排进了异步链：
