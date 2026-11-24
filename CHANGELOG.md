@@ -4,6 +4,42 @@
 每条写「为什么」而不只是「改了什么」—— 这个插件的坑大多来自 DSH 宿主的隐式约定，
 不记下来下次还会踩。
 
+## [0.7.3] - 2026-11-25
+
+0.7.2 把「最近记录」的释放体积改成喂整行 `freedBytes(row)`，但 0.7.2 那天没说清的一件
+事：`recent[]` 这一行**根本没有顶层 `cleanedBytes`**。
+
+`lib/stats.js` 构造 `recent[]` 时只写了 `preCleanedBytes`，`cleanedBytes` 只存在于
+`row.verify` 里；`bySession[]` 和单轮记录都是两份都写。而 `lib/client.js` 的
+`freedBytes(row)` 读的是 `row.cleanedBytes + row.preCleanedBytes`——
+
+```js
+const cleaned = typeof row?.cleanedBytes === 'number' ? row.cleanedBytes : 0
+```
+
+`undefined` 被 `typeof` 挡下，静默变 0。于是「释放」列其实只显示了模型自己先清掉的那半。
+
+现在看不出来，是因为当前账本 recent 20 行的 `verify.cleanedBytes` 全是 0：模型几乎总在
+复核之前就把临时件删了，闸门去 stat 时只剩空目录，`cleaned` 自然记 0。但只要有一轮闸门
+真的核到了被删的东西（例如 `prune` 模式删掉的备份），那一行就会少算，而且少得无声无息
+—— 这正是 0.7.2 修掉的那个「只取一半」的形状，只是换了个方向。
+
+### Fixed
+
+- `recent[]` 每行补顶层 `cleanedBytes: Number(e.verify?.cleanedBytes) || 0`，与
+  `bySession[]`、单轮记录三处口径统一。面板「释放」列从此 = 闸门核到已消失的 +
+  模型抢在复核前自己删的。
+
+### 为什么测试没拦住
+
+`test/web.mjs` 只断言了 `recent[0].verify.cleanedBytes === 1`，没断言行顶层有没有这个
+字段——测的是「verify 里有」，而面板读的是「行里有」。现在补一条
+`recent 行顶层带 cleanedBytes 与 preCleanedBytes`；`test/client.mjs` 补一条
+`recent 行的释放体积 = 行顶层 cleanedBytes + preCleanedBytes`（喂 `cleanedBytes: 2419`
++ `preCleanedBytes: 105953`，断言渲染出 `108372`），锁住「两个加数都要算」。
+把 `lib/stats.js` 的改动 stash 掉，web.mjs 立刻红：
+`FAIL recent 行顶层带 cleanedBytes 与 preCleanedBytes — {"preCleanedBytes":0}`。
+
 ## [0.7.2] - 2026-11-21
 
 两个都是「数据对、界面不对」和「代码在、时机不对」的错，共同点是**测试把要验证的前提

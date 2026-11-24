@@ -234,6 +234,19 @@ check(
   '待复核的行同样带出释放体积（数据已落账，只是还没 stat）',
   pendingText
 )
+// 两个加数都要算: 行顶层 cleanedBytes（闸门报出去、之后真消失的）与 preCleanedBytes
+// （模型抢在复核前自己删的）。只取其一会让这类轮次少算一半。
+const mixedText = flatten(
+  RecentTable({
+    stats: { recent: [{ ...recentRow, cleanedBytes: 2419, preCleanedBytes: 105953 }] },
+    t: (k) => `t:${k}`
+  })
+).join(' | ')
+check(
+  mixedText.includes(bytes(105953 + 2419)),
+  'recent 行的释放体积 = 行顶层 cleanedBytes + preCleanedBytes',
+  mixedText
+)
 
 // --- render smoke: TurnBadge must return null when the turn was never gated --
 const rendered = tail.component({ turn: 7, sessionId: 'session-abc', t: (k) => `t:${k}` })

@@ -186,6 +186,11 @@ check('bySession 行带体积',
 check('recent 行的复核带体积',
   all.json.recent?.[0]?.verify?.cleanedBytes === 1 && all.json.recent?.[0]?.verify?.remainingBytes === 1,
   JSON.stringify(all.json.recent?.[0]?.verify))
+// 行顶层也要有 cleanedBytes：面板的 freedBytes(row) 读整行，不是读 row.verify。
+// 缺这个字段时 typeof 把 undefined 当 0，那列会静默少算 cleanedBytes 那部分。
+check('recent 行顶层带 cleanedBytes 与 preCleanedBytes',
+  all.json.recent?.[0]?.cleanedBytes === 1 && all.json.recent?.[0]?.preCleanedBytes === 0,
+  JSON.stringify({ cleanedBytes: all.json.recent?.[0]?.cleanedBytes, preCleanedBytes: all.json.recent?.[0]?.preCleanedBytes }))
 
 // v3：模型自己先清干净的那部分单独记，面板的「已释放空间」= cleanedBytes + preCleanedBytes。
 // 这个场景里模型没抢在闸门之前动手（闸门当场就报了两个 probe），所以 preCleaned 应为 0，
