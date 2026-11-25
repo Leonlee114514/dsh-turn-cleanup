@@ -1,6 +1,6 @@
 {
   "name": "dsh-turn-cleanup",
-  "version": "0.7.3",
+  "version": "0.8.0",
   "description": "DeepSeek Harness 的收尾清场闸门：每轮 turn 结束时检查本轮写入的临时文件和超量 .bak 备份，非空就把清单推回给模型，由它删掉或说明理由。模型可用 report_temp_cleanup 上报自己删掉的路径与体积，另有 Web 面板统计拦截次数、已清文件数、释放空间与依从率。",
   "type": "module",
   "main": "lib/index.js",
@@ -50,8 +50,8 @@
     "dsh": ">=0.2.1-rc.5"
   },
   "scripts": {
-    "check": "node --check lib/index.js && node --check lib/stats.js && node --check lib/messages.js && node --check lib/client.js && node --check test/sim.mjs && node --check test/web.mjs && node --check test/client.mjs && node --check test/report.mjs && node --check test/tool-agnostic.mjs",
-    "test": "node test/sim.mjs && node test/web.mjs && node test/client.mjs && node test/report.mjs && node test/tool-agnostic.mjs",
+    "check": "node --check lib/index.js && node --check lib/stats.js && node --check lib/messages.js && node --check lib/client.js && node --check test/sim.mjs && node --check test/web.mjs && node --check test/client.mjs && node --check test/report.mjs && node --check test/tool-agnostic.mjs && node --check test/regress.mjs",
+    "test": "node test/sim.mjs && node test/web.mjs && node test/client.mjs && node test/report.mjs && node test/tool-agnostic.mjs && node test/regress.mjs",
     "verify": "npm run check && npm test"
   }
 }

@@ -6,7 +6,7 @@
 //   1) write/edit intent 落盘那一刻就把体积记进 state（文件还没被删，量得到）；
 //   2) 模型用 rm -f 删掉、插件拿不到体积时，靠 report_temp_cleanup 主动上报。
 // 这个文件把两条链路各跑一遍，断言账本里真的记上了字节。
-import { mkdtemp, writeFile, mkdir, rm, readFile } from 'node:fs/promises'
+import { mkdtemp, writeFile, mkdir, rm, readFile, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply } from '../lib/index.js'
@@ -273,15 +273,84 @@ check('files 是必填数组',
   check('9 体积只来自 observed（64，不是 0）', rec?.preCleanedBytes === 64, String(rec?.preCleanedBytes))
 }
 
-// ── 场景 6：账本文件是 v3 且带 kind / preCleaned 字段 ──────────────────────
+// ── 场景 6：账本文件是 v4 且带 kind / preCleaned 字段 ──────────────────────
 {
   const raw = JSON.parse(await readFile(statsFile, 'utf8'))
-  check('6 账本版本是 3', raw.version === 3, String(raw.version))
+  // v4：verify 增加 unknown 三态，事件增加 seq / preCleanedOmitted。
+  check('6 账本版本是 4', raw.version === 4, String(raw.version))
   const auto = raw.events.find((e) => e.kind === 'auto')
   check('6 事件带 kind 字段', auto !== undefined, `events=${raw.events.length}`)
   check('6 auto 事件带 preCleaned 数组',
     Array.isArray(auto?.preCleaned) && auto.preCleaned.length > 0,
     JSON.stringify(auto?.preCleaned))
+}
+
+// ── 场景 10：并发 load 不丢事件（旧实现先置 loaded=true 再读盘）───────
+// 病根：this.loaded = true 写在 await readFile 之前，第二个调用者立刻拿到空
+// events，随后 recordGate 与 readFromDisk 的赋值互相整块覆盖 —— 探针里新事件直接消失。
+{
+  const concurrentFile = join(root, 'logs', 'concurrent.json')
+  const store = new StatsStore(concurrentFile, { info() {}, warn() {} })
+  const base = {
+    cwd, sid: 'sess-c', turn: 1, kind: 'gate', steerMode: 'followup',
+    temps: ['probe-a.mjs'], backups: [], pruned: [], sizes: {}, preCleaned: [],
+    keep: 3, mode: 'steer'
+  }
+  await Promise.all([
+    store.recordGate({ ...base, turn: 1 }),
+    store.recordGate({ ...base, turn: 2 }),
+    store.recordGate({ ...base, turn: 3 })
+  ])
+  const reread = new StatsStore(concurrentFile, { info() {}, warn() {} })
+  const loaded = await reread.load()
+  check('10 并发 recordGate 三条全部落盘', reread.events.length === 3,
+    `events=${reread.events.length}`)
+  check('10 落盘的 turn 是 1/2/3',
+    reread.events.map((e) => e.turn).sort((a, b) => a - b).join(',') === '1,2,3',
+    reread.events.map((e) => e.turn).join(','))
+  check('10 load() 幂等', loaded === (await reread.load()), 'returned different values')
+
+  const rawConcurrent = JSON.parse(await readFile(concurrentFile, 'utf8'))
+  check('10 磁盘上的账本没有被截断', rawConcurrent.events.length === 3,
+    String(rawConcurrent.events.length))
+  check('10 没有残留 .tmp 中间文件',
+    (await readdir(join(root, 'logs'))).every((n) => !n.includes('.tmp-')),
+    JSON.stringify(await readdir(join(root, 'logs'))))
+}
+
+// ── 场景 11：损坏账本先隔离再重开，不让整本历史静默归零 ───────────────
+// 病根：JSON.parse 抛错直接冒泡，路由 500；或当成空账本继续写，下次 save
+// 把原文件整块覆盖 —— 40 条历史一次性消失（探针实测）。
+{
+  const corruptFile = join(root, 'logs', 'corrupt.json')
+  await mkdir(join(root, 'logs'), { recursive: true })
+  await writeFile(corruptFile, '{ "version": 4, "events": [ {"turn": 1', 'utf8')
+  const warns = []
+  const store = new StatsStore(corruptFile, { info() {}, warn: (m) => warns.push(m) })
+  let threw = null
+  try {
+    await store.load()
+  } catch (error) {
+    threw = error
+  }
+  check('11 损坏账本 load 不抛', threw === null, String(threw?.message ?? '-'))
+  check('11 启动为空账本', store.events.length === 0, `events=${store.events.length}`)
+  check('11 打了 warn', warns.some((m) => m.includes('not valid JSON')), JSON.stringify(warns))
+  const names = await readdir(join(root, 'logs'))
+  const quarantined = names.filter((n) => n.startsWith('corrupt.json.corrupt-'))
+  check('11 原文件被改名成 .corrupt-*', quarantined.length === 1, JSON.stringify(names))
+  check('11 隔离后原路径已空出', !names.includes('corrupt.json'), JSON.stringify(names))
+
+  await store.recordGate({
+    cwd, sid: 'sess-c', turn: 9, kind: 'gate', steerMode: 'followup',
+    temps: [], backups: [], pruned: [], sizes: {}, preCleaned: [], keep: 3, mode: 'steer'
+  })
+  const after = JSON.parse(await readFile(corruptFile, 'utf8'))
+  check('11 隔离后能继续追加', after.version === 4 && after.events.length === 1,
+    JSON.stringify({ version: after.version, events: after.events?.length }))
+  check('11 追加的事件可被重新读回',
+    (await new StatsStore(corruptFile, { info() {}, warn() {} }).turnRecord('sess-c', 9)) !== null,
+    'turnRecord returned null')
 }
 
 await rm(root, { recursive: true, force: true })

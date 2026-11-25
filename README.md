@@ -27,8 +27,10 @@ DSH 三层都缺自动清理：
 
 `agent/turn-stopping` 是 `serial` 模式，await 在 turn 边界提交**之前**：
 
+宿主 `dsh-agent-loop` 的 turn 收尾分支（0.2.2-rc.2 里在 `lib/index.js:809-816`；行号会随版本漂移，
+搜 `await this.dispatch.serial('agent/turn-stopping'` 更稳）：
+
 ```js
-// dsh-agent-loop/lib/index.js:809-816
 if (turnEnds && this.inbox.nextStep.length === 0) {
   await this.dispatch.serial('agent/turn-stopping', { turn, signal });
   signal.throwIfAborted();
@@ -224,21 +226,23 @@ Delete them. If one must stay, say why for each and move it somewhere deliberate
 目录里，DSH 的 Plugins → Discover（或 dshmarket）搜 `turn-cleanup` 点安装即可。
 装完即生效，不用重启。
 
-**B. 命令行（bundle 安装）**
-
-```bash
-dsh plugin --profile <profile> add dsh-turn-cleanup
-```
-
-`<profile>` 换成你自己的：`~/.dsh/profiles/` 下有哪些目录就用哪个名字。
-
-**C. git 源（想跟 main 分支）**
+**B. 命令行（git 源，最通用）**
 
 ```bash
 dsh plugin --profile <profile> add github:Leonlee114514/dsh-turn-cleanup
 # 等价写法：
 #   dsh plugin --profile <profile> add https://github.com/Leonlee114514/dsh-turn-cleanup
 ```
+
+`<profile>` 换成你自己的：`~/.dsh/profiles/` 下有哪些目录就用哪个名字。这条不依赖 npm 上有没有这个包。
+
+**C. npm 名（仅在这个包已发布到 registry 时可用）**
+
+```bash
+dsh plugin --profile <profile> add dsh-turn-cleanup
+```
+
+没发布过就会报 `404 Not Found`，这时用 B。
 
 包根的 `cordis.patch.yml` 会被自动应用，闸门默认开启，配置用默认值。要改配置就在自己 profile
 的 `cordis.patch.yml` 里按同一个 id 覆盖，不要另加一条 `- insert`（同 id 两条会被 cordis
@@ -254,12 +258,14 @@ git clone https://github.com/Leonlee114514/dsh-turn-cleanup.git ~/.dsh/local-pkg
 #    "dsh-turn-cleanup": "link:../../local-pkgs/dsh-turn-cleanup"
 
 # 3. 建符号链接（pnpm install 在有远端依赖时会卡住，手工建更可靠）
-#    `desktop` 换成你自己的 profile 名：~/.dsh/profiles/ 下有哪些就用哪个
-node -e "
+#    <profile> 换成你自己的：~/.dsh/profiles/ 下有哪些目录就用哪个名字
+#    （不写死任何 profile 名，否则别人复制这段只会连到不存在的目录）
+DSH_PROFILE=<profile> node -e "
 const { symlinkSync } = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const profile = process.env.DSH_PROFILE || 'desktop';   // ← 改成你的 profile 名
+const profile = process.env.DSH_PROFILE;
+if (!profile) { console.error('set DSH_PROFILE to your profile name'); process.exit(1) }
 symlinkSync(
   path.join(os.homedir(), '.dsh/local-pkgs/dsh-turn-cleanup'),
   path.join(os.homedir(), '.dsh/profiles', profile, 'node_modules/dsh-turn-cleanup'),
@@ -309,11 +315,12 @@ cordis_inspect_query → host / Config / listConfigs, name: dsh-turn-cleanup
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `enabled` | `true` | `false` → 完全不装闸门（连 listener 都不注册） |
-| `tmpDirName` | `.agent-tmp` | 约定目录名，相对 cwd |
+| `tmpDirName` | `.agent-tmp` | 约定目录名，相对 cwd。反斜杠归一成 `/`；绝对路径 / 盘符一律回落 `.agent-tmp`（不让它跑出工作区） |
 | `patterns` | `probe-*` `tmp-*` `scratch-*` `check-*` `check_*` `diag_*` `bench-*` `bench_*` `*.bak-*` | 文件名 glob，只支持 `*` / `?`，大小写不敏感；匹配的是 basename |
 | `protectedSegments` | `.git` `node_modules` `out` `dist` `build` `target` `vendor` `.venv` `__pycache__` | 这些目录段下的东西一律不报；**给数组则整体替换**默认值 |
 | `messageLocale` | `auto` | 注入文案语言：`auto` / `zh` / `en` |
-| `scanDepth` | `4` | `.agent-tmp` 递归深度，1..6 |
+| `scanDepth` | `4` | `.agent-tmp` 递归深度，1..6（根下文件算第 1 层） |
+| `mtimeToleranceMs` | `2000` | 通道 4 的 mtime 容差，0..60000。`mtime + 容差 < 本轮开始` 才算老文件 |
 | `maxLogPaths` | `10` | 日志里最多列几条 |
 | `maxSteerPaths` | `20` | steer 文案里最多列几条 |
 | `logFile` | `""` | 落盘旁路；相对 cwd 或绝对路径 |
@@ -321,7 +328,7 @@ cordis_inspect_query → host / Config / listConfigs, name: dsh-turn-cleanup
 | `stats` | `true` | `false` → 不记账、不装 `/turn-cleanup/stats` 端点 |
 | `statsFile` | `""` | 账本路径；留空 = `logFile` 同目录的 `turn-cleanup-stats.json` |
 | `backupRetention.enabled` | `true` | `false` → 整个通道 3 关闭 |
-| `backupRetention.keep` | `3` | 同一原件保留几份，1..20 |
+| `backupRetention.keep` | `3` | 同一原件保留几份，1..20。`0` / 负数 / 非数字一律回落 `3`（不是夹成 1） |
 | `backupRetention.mode` | `steer` | `steer` 只列清单；`prune` 插件自己删 |
 | `backupRetention.requireOriginalPresent` | `true` | 原件不在的家族整族跳过 |
 | `backupRetention.maxPrunePerTurn` | `50` | `prune` 模式每轮删除上限 |
@@ -359,9 +366,21 @@ cordis_inspect_query → host / Config / listConfigs, name: dsh-turn-cleanup
 2026-11-07T03:43:31.838Z followup session=<id> turn=2 cwd=<cwd> files=2 paths=[.agent-tmp/scratch-run.log, probe-yyy.mjs]
 ```
 
-行首是实际交付方式（`followup` / `steer`），`prune` 模式自己删东西时另有一行 `prune …`。
+行首是实际交付方式（`followup` / `steer`）。`prune` 模式自己删东西时另有三行，按结果分流：
 
-写日志失败一律静默。落盘只是取证旁路，不能因为路径不可写而拖住 turn 边界。
+```
+prune        session=<id> turn=2 cwd=<cwd> deleted=3 bytes=12288 keep=3 paths=[a.bak-v0, a.bak-v1, a.bak-v2]
+prune-failed session=<id> turn=2 cwd=<cwd> failed=1 keep=3 items=[a.bak-v0 (EACCES)]
+prune-limit  session=<id> turn=2 cwd=<cwd> limit=1 deleted=1
+```
+
+- `prune` → `logger.info`：真删掉的清单，`bytes` 取自**删除前**的 `lstat().size`；
+- `prune-failed` → `logger.warn`：`unlink` 抛错的条目，括号里是 `error.code`（没有 code 时退到
+  `error.message`）。0.7.3 及以前这里是空 `catch {}`，EACCES / EBUSY 被吞得一点痕迹都没有；
+- `prune-limit` → `logger.warn`：撞到 `backupRetention.maxPrunePerTurn` 就停下，本轮不再删。
+  没删完的备份下一轮还会被列为超量，不会漏掉。
+
+三条都会同样写进 `logFile`。写日志失败一律静默。落盘只是取证旁路，不能因为路径不可写而拖住 turn 边界。
 
 ---
 
@@ -373,7 +392,12 @@ Web 面板：
 - **设置页 → 收尾清场**：五张卡（已释放空间 / 拦截次数 / 报出文件数 / 已清文件数 / 依从率），
   下面是最近记录与按会话的分布表；范围可切「全部会话 / 当前会话」。模型自己先清干净、
   闸门没开口的那些轮次也记账（`kind: 'auto'`），所以「已释放空间」不会因为手脚太快停在 0。
-- **每个 turn 末尾一行徽章**：这一轮拦了什么、清没清、腾了多少。没拦过就不显示。
+  「拦截次数」只数**真拦下东西**的轮次（`kind !== 'auto'`）；`auto` 轮另有 `autoRounds` 字段，
+  面板据此判断「有没有记录」而不是「有没有拦过」。
+- **每个 turn 末尾一行徽章**：这一轮拦了什么、清没清、腾了多少。没拦过就不显示。徽章只播
+  本轮的清单：`turnRecord()` 会区分 `own`（本轮自己的事件）与 `carried`（上一轮 gate 带来复核的），
+  `own === false` 且还没复核时整轮不渲染 —— 否则默认 `followup` 模式下每个干净轮都会挂着
+  上一轮的数字，看起来像「这一轮又留下 3 个临时件」。
 
 ### 「已释放空间」是怎么量的
 
@@ -437,16 +461,31 @@ turn 边界上排队几百次 `stat`。
 
 ### 依从率是怎么算的
 
-不靠猜。闸门拦下时把清单记进账本（`statsFile`），**下一轮 turn 结束**再回头 stat 一遍那些路径：
+不靠猜。闸门拦下时把清单记进账本（`statsFile`），**下一轮 turn 结束**再回头 stat 一遍那些路径，
+结果是三态而不是两态：
 
-- 文件没了 → 算 `cleaned`
+- 文件没了（`ENOENT` / `ENOTDIR`）→ 算 `cleaned`
 - 文件还在 → 算 `remaining`
-- `compliance = cleaned / (cleaned + remaining)`
+- **stat 报了别的错**（`EACCES`、`EBUSY`、网络盘断连 `ETIMEDOUT` / `EIO`…）→ 算 `unknown`
 
-只复核「同 sid + 同 turn 且还没复核过」的那条记录。跨轮补算会让更早的 turn 在模型早已
-清掉之后才算，依从率虚高。
+`compliance = cleaned / (cleaned + remaining)`，`unknown` **不进分母**。
 
-`prune` 模式自己删掉的备份直接计入 `cleaned`（有日志为证，不用等下一轮）。
+为什么要有第三态：0.7.3 及以前把「stat 失败」和「文件不在」当成同一件事，于是网盘掉线、
+权限不足这类情况一律按「已删除」计入 `cleaned`，`cleanedBytes` 凭空涨、依从率冲到 100%。
+现在只有确定的 `ENOENT` / `ENOTDIR` 才算消失，量不到就记成未知——宁可少报不猜，和体积的口径一致。
+汇总里对应 `unknown` / `recent[].verify.unknown` / `verify.unknownTemps` / `verify.unknownBackups`；
+面板的「复核」列显示成「已清 N / 仍在 M / 未知 K」，K 为 0 时不显示。
+
+复核的范围是**所有**「同 sid + 同 turn、且还没复核过」的记录，不是只取一条。同一 sid + turn
+可能是多条（resume 复用轮次、fork 出同 sid；`followup` 模式下上一轮 gate 的 `verifyAtTurn`
+正好等于本轮的 `turn`，而本轮自己也可能写一条 `auto`）。早先实现里循环 `target = event` 一路
+覆盖，只留下最后一条 —— 而 `auto` 通常后写，于是**真正拦过的那条 gate 永远停在待复核**：
+「待复核」计数只涨不落、`cleaned` / `remaining` 丢失、依从率分母偏小。现在逐个复核、`save()`
+整批一次落盘。`auto` 事件不排除在外：它本来就没有清单，探针空转一次就得到「已复核的空结果」，
+成本可以忽略。
+
+`prune` 模式自己删掉的备份直接计入 `cleaned`（有日志为证，不用等下一轮），且只加条数与字节，
+不重复累加 `preCleaned`——那部分在 `recordGate` 落账时就已经是既成事实，由 `summary()` 直接计入。
 
 ### 数据通道
 
@@ -457,6 +496,13 @@ GET /turn-cleanup/stats                       # 全局汇总
 GET /turn-cleanup/stats?scope=session&sid=…   # 单会话汇总
 GET /turn-cleanup/stats?sid=…&turn=…          # 单轮记录，null = 这轮没拦过
 ```
+
+只认 `GET` / `HEAD`，其余方法一律 `405` 并回 `allow: GET, HEAD`（宿主按 path 派发、不校验
+method，任何 method 都会进到 handler 里，所以这一层得插件自己挡）。`turn=` 给了但不是数字、
+或者给了 `turn=` 却没给 `sid` → `400`。`500` 只回固定文案 `stats unavailable`，完整堆栈进
+`logger.warn`——早先版本把内部异常文本直接回给浏览器，等于把账本路径暴露给页面。
+
+`scope=session` 但没给 `sid` 时退回全局（否则前端切「当前会话」而会话 id 还没到位会拿到空面板）。
 
 汇总里的字节字段：`reportedBytes`（报出去的清单总共多大）、`cleanedBytes`（复核确认已消失的
 那部分）、`preCleanedBytes`（模型在复核之前就自己清掉的）、`remainingBytes`（复核时还在的）。
@@ -477,6 +523,27 @@ GET /turn-cleanup/stats?sid=…&turn=…          # 单轮记录，null = 这轮
 是闸门报出去、复核时真消失了的（`prune` 删掉的备份也算这里）。0.7.3 之前 `recent[]` 只写了
 前者，而 `freedBytes` 的 `typeof row?.cleanedBytes === 'number'` 把 `undefined` 静默当 0，
 于是「释放」列只覆盖了 `preCleanedBytes`。三处（汇总、`bySession[]`、`recent[]`）现在口径一致。
+
+**`bySession` 恒基于全量事件，不随 `scope` 收窄。** 它是面板顶部那个会话下拉与对比表的唯一数据源：
+早先版本拿过滤后的事件累加，于是 `?scope=session` 时只剩一行——下拉永远一个选项、对比表恒隐藏，
+而数字卡又确实是全量，两边看起来互相矛盾。现在 `bySession.length === sessionCount`（字段 `sessions`
+是它的别名，保留给老前端），`tables` 有没有内容由行数决定，与 `scope` 无关。
+
+**`preCleaned` 明细只存前 100 条。** 一轮里模型自己清掉的文件数可能上千，账本不该被它撑爆。
+超出的部分折成 `preCleanedOmitted`（条数）与 `preCleanedOmittedBytes`（字节），`preCleaned` 与
+`preCleanedBytes` 仍然是**完整**口径（`preCleaned + preCleanedOmitted`），面板和汇总不受影响。
+
+### 账本文件
+
+`statsFile` 是一份 `{ version: 4, events: [...] }` 的 JSON，超过 1000 条时先丢**已复核过**的老事件
+（`verify !== null`），不够再按时间丢最旧的。写入是「先写 `同名文件.tmp-<pid>-<序号>` 再 `rename`」：
+`rename` 在同一分区上是原子的，进程中途被杀只会留下一个孤儿 tmp，账本本身不会截断。
+0.7.3 及以前直接 `writeFile` 目标文件，中途被杀就是半截 JSON，下次 `load` 当空账本、再 `save`
+把 40 条历史永久抹掉——账本丢过一次就再也回不来，这条比它看起来严重。
+
+读到坏 JSON 不会让插件炸掉，也不会静默覆盖：先 `rename` 成 `同名文件.corrupt-<ISO 时间>` 留证，
+再以空账本继续跑。`load()` 是**幂等**的（第一个调用者建 Promise，后续全等同一个），所以 `recordGate`
+与面板请求并发时不会出现「一个拿到空账本、另一个把它的 events 整块覆盖」的竞态。
 
 为什么不走 `remote.*` RPC：本插件没有 host 服务对象，注册一条 HTTP 路由比造一套 service 加
 RPC 契约轻得多，也不用管 relay / 远程模式的 origin 探测。
@@ -545,24 +612,37 @@ RPC 契约轻得多，也不用管 relay / 远程模式的 origin 探测。
 单元测试用假 ctx 模拟 agent-loop 的调用顺序，不依赖 DSH 运行时：
 
 ```bash
-npm test        # 57 + 32 + 48 + 31 + 17 = 185 checks passed
+npm test        # 82 + 42 + 48 + 43 + 17 + 26 = 258 checks passed
 npm run verify  # syntax check + test
 ```
 
-五份测试各管一段。`test/sim.mjs` 驱动闸门与通道 1/2/3（57 项）。`test/web.mjs` 驱动
+六份测试各管一段。`test/sim.mjs` 驱动闸门与通道 1/2/3（82 项）。`test/web.mjs` 驱动
 StatsStore 与 `/turn-cleanup/stats` 端点、体积字段（含 `recent[]` 行顶层的 `cleanedBytes`）、
-then-only 的 `ctx.inject` 假实现，以及「服务尚未 ACTIVE、`ctx.get` 恒 undefined」的冷启动
-现场（32 项）。`test/client.mjs` 用假 `window.__ModuleLoader__` 加载真实 client bundle，
-断言 slot 注册形状、locale 字典、`fmtBytes` 进位与 recent 行的释放体积渲染（48 项）。
-`test/report.mjs` 覆盖 `report_temp_cleanup` 上报链路与 `fs/observed` 体积（31 项）。
-`test/tool-agnostic.mjs` 覆盖通道 4 的不认工具名采集（17 项）。五份都在 CI 里跑
-（ubuntu × node 20/22/24，加 windows/macos）。
+路由的 405 / 400 契约、`bySession` 会话视图、then-only 的 `ctx.inject` 假实现，以及
+「服务尚未 ACTIVE、`ctx.get` 恒 undefined」的冷启动现场（42 项）。`test/client.mjs` 用假
+`window.__ModuleLoader__` 加载真实 client bundle，断言 slot 注册形状、locale 字典、`fmtBytes`
+进位与 recent 行的释放体积渲染（48 项）。`test/report.mjs` 覆盖 `report_temp_cleanup` 上报
+链路、`fs/observed` 体积、账本并发 `load` 不丢事件与坏账本隔离（43 项）。
+`test/tool-agnostic.mjs` 覆盖通道 4 的不认工具名采集（17 项）。`test/regress.mjs` 专收
+`AUDIT-logic.md` 里**在别的套件构造不出来**的反例：同轮 `gate(N)` + `auto(N+1)` 抢同一个
+复核点、纯 `auto` 账本不该涨「拦截次数」、cwd 含空格的路径提取、多链接文件的体积口径
+（26 项）。六份都在 CI 里跑（ubuntu × node 20/22/24，加 windows/macos）。
 
 `test/sim.mjs` 里有几项是**可移植性回归**，专门锁住「本机能跑、别人机器上误伤/漏报」的坑：
 正常业务文件名（`checkout.js` / `Checklist.md` / `benchmark.ts`）不误伤、带分隔符的
 `check-1.sh` / `bench_2.mjs` 仍命中、`protectedSegments` 可整体替换、`fs/edit-intent` 与
 `fs/delete-intent` 也记账、`messageLocale` 中英切换、`workingDirectory` 服务优先于
 `header.cwd`、cwd 是 junction 时经 realpath 归一仍能命中。
+
+另外几条是**数据安全回归**，每一条都对应一次「本来会毁掉东西」的缺陷：
+
+- `README.bak.md` 名字里带 `.bak` 但不是备份，`keep: 1` + `prune` 之后必须仍在；
+- `x.bak.bak` 不并入 `x` 的家族（家族判定不递归剥离）；
+- `keep: 0` 回落 3 而不是夹成 1（6 份只删 3 份，不是删 5 份）；
+- `scanDepth: 4` 报到第 4 层、第 5 层不报；`tmpDirName: '../escape'` 越界后被 `insideCwd` 拦下；
+- `tmpDirName: 'tmp\\agent'` 归一成 posix 后仍命中，`'D:\\x'` 回落 `.agent-tmp`；
+- `mtimeToleranceMs: 0` 时刚被改过的文件不算「老文件」，默认 2000 时算；
+- `maxPrunePerTurn: 1` 时只删 1 份并留 `prune-limit` 日志，剩余备份下轮继续。
 
 ---
 

@@ -4,6 +4,207 @@
 每条写「为什么」而不只是「改了什么」—— 这个插件的坑大多来自 DSH 宿主的隐式约定，
 不记下来下次还会踩。
 
+## [0.8.0] - 2026-11-25
+
+这一版没有新功能，是一次从头到尾的代码逻辑审查之后的集中修复。三轮只读审查共 72 条发现
+（28 + 26 + 18），按 P0–P3 定级，全部处理完。下面按「会伤到用户的东西」优先排。
+
+### Fixed · 会删错文件或丢数据
+
+- **`prune` 模式会删掉用户文档（P0）。** `BACKUP_RE` 原来写成 `/\.bak(?:\..*)?$/`
+  这类形状，于是 `README.bak.md` 被当成原件 `README` 的备份家族成员。同族够多时
+  `prune` 会把它当超量备份 `unlink` —— 用户的文档。现在只认两种后缀：`.bak-<任意>`
+  与 `.bak.<数字/时间戳/v<数字>>`，`README.bak.md` / `notes.bak.txt` 不再进任何家族。
+- **`x.bak.bak` 曾能被并入 `x` 家族。** 家族判定改成 `backupFamily(name) === stem` 之后
+  不再递归剥离，`a.txt.bak.bak` 的 stem 是 `a.txt.bak`，与 `a.txt` 不同族。
+- **`keep: 0` 被静默夹成 1，等同于「只剩一份」。** 现在 0 / 负数 / NaN 一律回落默认 3。
+  配错一个 0 不该变成「几乎全删」。
+- **账本 `save()` 没有原子性（P0）。** 原来直接 `writeFile` 目标文件，进程中途被杀就是
+  半截 JSON；下次 `load` 解析失败当空账本，再 `save` 就把历史永久抹掉（实测一次丢 40 条）。
+  现在写 `同名文件.tmp-<pid>-<序号>` 再 `rename`，失败会 `unlink` 残留。
+- **`load()` 有竞态（P0）。** 原来 `this.loaded = true` 写在 `await readFile` 之前，第二个
+  并发调用者拿到空 `events`，随后 `recordGate` 与 `load` 交错时 `this.events = parsed.events`
+  把刚落的新事件整块覆盖。现在用一个 Promise 当门（`this.loading`），幂等且只读一次盘。
+- **坏账本一律静默覆盖。** 现在先 `rename` 成 `同名文件.corrupt-<ISO>` 留证，再以空账本
+  继续；日志里说明发生了什么。
+
+### Fixed · 会虚报或错报数字
+
+- **`stat` 失败被当成「文件已删除」。** 网盘断连、`EACCES` 原先都进 `cleaned`，
+  `cleanedBytes` 凭空涨、依从率冲到 100%。`probe()` 改成三态，只有 `ENOENT` / `ENOTDIR`
+  算消失，其余进 `unknown`，且 `unknown` 不进依从率分母。
+- **同一文件被两个通道重复计入 `preCleaned`。** 通道 2（消失的已记账路径）与通道 3
+  （`reported` 主动上报）各记一次，同一个文件能进两次，已释放空间虚增一倍。去重键统一
+  为 `rel` + `abs` 双记。
+- **`measureSizes` 的 `limit` 让 `backupList` 一个都量不到。** 原来整份清单共用一个上限，
+  临时件先占满，备份永远量不出体积。现在预算对半分。
+- **`collectTouched` 的 mtime 容差是硬编码 1000 ms。** FAT32 / exFAT 的时间戳粒度是 2 秒、
+  SMB 是 1 秒，1 秒容差在这三种盘上必假阴性——本轮真正写过的文件被当成老文件丢掉。
+  新增配置 `mtimeToleranceMs`，默认 2000，夹 0..60000。
+- **`scanTmpDir` 实际只报到第 2 层，文档写的是 4。** 深度语义修正为「根下文件算第 1 层」，
+  `scanDepth: 4` 现在真的报到第 4 层。
+- **`preCleaned` 明细会无限增长。** 一轮清上千个文件时账本被撑爆。现在只存前 100 条，
+  余量折成 `preCleanedOmitted` / `preCleanedOmittedBytes`，总量口径不变。
+
+### Fixed · 会卡住或拖慢每一轮
+
+- **`turn-stopping` 里 `await` 记账。** 宿主对 `agent/turn-stopping` 是 `dispatch.serial`
+  串行 `await`（`dsh-agent-loop` 里搜 `dispatch.serial('agent/turn-stopping'`；0.2.2-rc.2 在
+  `lib/index.js:809-816`，行号随版本漂移），插件在里面 `await record()` +
+  `measureSizes()`（200 次串行 `stat`）等于把每轮退出拖长。现在记账走内部串行队列
+  `recordChain`，9 处调用全改 `void record(...)`。
+- **`measureSizes` 串行 stat。** 200 个文件逐个 `await` 改成 16 条一批 `Promise.all`。
+- **徽章在 `followup` 模式下永远停在「待复核」。** 记录写的是 `verifyAtTurn = turn + 1`，
+  但客户端的 `useEffect` deps 只有 `[sid, turnNo]`，到下一轮时组件没重取。`TurnBadge` 改成
+  有限次退避重取（2 s / 5 s / 10 s / 20 s），带 `clearTimeout` 清理。
+- **面板的会话下拉恒只有一个选项、对比表恒隐藏。** `bySession` 原来由**过滤后**的事件聚合，
+  `?scope=session` 时只剩一行。现在恒基于全量事件，新增 `sessionCount`（`sessions` 是别名）。
+- **`fs/observed` 的 async 监听器与 `delete-intent` 抢同一份 `s.paths`。** 读文件也会发
+  `fs/observed`，一次晚到的 `stat` 会把刚记下的体积覆盖成旧值。现在用 CAS：写回前比对
+  `s.paths.get(abs)` 是否仍是进函数时那个值。
+
+### Fixed · 配置与路径
+
+- **`tmpDirName` 含反斜杠时约定目录通道恒失效。** 原代码用 `${cfg.tmpDirName}/` 直接和
+  `toPosix(rel)` 比，`tmp\agent` 永远匹配不上。`normalizeConfig` 现在先归一成 posix；
+  绝对路径 / 盘符（`D:\x`、`/tmp/x`）一律回落 `.agent-tmp`，不再让约定目录跑到工作区外。
+- **`.agent-tmp` 的前导点曾被剥掉。** 归一逻辑现在保留前导点（曾归一成 `agent-tmp`）。
+- **`maxLogPaths` / `maxSteerPaths` / `scanDepth` 传小数会进 `slice` 报错或行为诡异。** 全部
+  `Math.floor` 并夹范围。
+- **`statsFile` 相对路径的基准写错了。** 现在显式 `resolvePath(process.cwd(), …)` 并加注释：
+  账本是全机一本，基准是进程 cwd 而不是会话 cwd。
+- **`globToRegExp` 只匹配 basename，用户写带目录的模式永不命中。** 配置表已写明「匹配的是
+  basename」，文档与实现对齐。
+
+### Fixed · 路由与面板
+
+- **`/turn-cleanup/stats` 不校验 method。** 宿主按 path 派发、任何 method 都会进 handler。
+  现在非 `GET` / `HEAD` 一律 405 + `allow: GET, HEAD`。
+- **`500` 把内部异常文本回给浏览器（等于暴露账本路径）。** 现在只回固定文案
+  `stats unavailable`，完整堆栈进 `logger.warn`。
+- **缺字段的事件让 `summary()` / `turnRecord()` 抛 `TypeError`，面板永久 500 白屏。**
+  `normalizeEvent()` 按白名单重建每条记录，坏记录直接丢弃；`load()` 也兼容 v2 无 `verify` 键
+  的旧账本。
+- **`turn=` 非法时回 200 + `null`。** 现在是 400。
+- **`client.js` 的 `catch` 把 `stats` 置 `null` 导致整页清空。** 现在保留上一次结果并显示
+  错误提示；`select` 的 value 改用 `effectiveSid`（原先下拉空白但数字是全量）；tooltip 的
+  `badgeTurn` 进 `DICT`，不再硬编码英文。
+- **`prune` 的 `catch {}` 吞掉所有 `unlink` 失败。** `pruneBackups` 现在返回
+  `{ deleted, failed, hitLimit }`：失败的进 `failed`（带 `error.code`），撞上限时 `hitLimit`
+  为真且**不中断其余家族的处理**，两者分别落 `prune-failed` / `prune-limit` 日志。
+
+### Fixed · 统计链路（`AUDIT-logic.md` A/B/C/K/L）
+
+这一组有一个共同根因：**`(sid, turn)` 不是唯一键，而 `followup` 让 `turn` 与 `verifyAtTurn`
+错开一轮。** 两者单独看都成立，叠在一起就让同一条 gate 事件和下一轮的 auto 事件抢同一个
+复核点。
+
+- **`verify()` 只复核最后一条匹配事件（A）。** 原来循环里 `target = event` 一路覆盖，同轮
+  后写的 auto 事件（`verifyAtTurn: turn`）把上一轮 gate 事件（`verifyAtTurn: turn + 1`）顶掉，
+  那条 gate 永远停在 `verify === null` —— 面板「待复核」计数只涨不落、依从率分母偏小。
+  现在收集**全部**待复核事件逐个复核、`save()` 整批一次落盘。没有对 auto 做特殊排除：
+  auto 本来就没有 `temps`/`backups`，探针空转一次就得到「已复核的空结果」，成本可以忽略。
+- **`turnRecord()` 把上一轮清单串进本轮徽章（L）。** 匹配式同时认 `e.turn === at` 与
+  `e.verifyAtTurn === at`，于是 turn N 拦下的清单会以「turn N+1 的徽章」出现。默认 `followup`
+  模式下每条拦截后**必现**：干净轮显示「3 个临时件待复核」。现在把命中事件切成 `own`
+  （本轮自己的）与 `carried`（上一轮带来复核的），只累加 `own` 的清单；返回值新增
+  `own` / `carried` 两个字段。
+- **`turnRecord()` 把 gate 与 auto 聚合、`kind` 被改写（C）。** 原来遍历里
+  `if (e.kind === 'auto') kind = 'auto'`，只要命中集合里有 auto 就改写整轮的 `kind`。现在
+  `kind` 只由本轮自己的事件决定（`ownGate ? 'gate' : own.length > 0 ? 'auto' : 'gate'`）。
+- **「最近记录」去重方向反了（B）。** 原来从尾部倒序扫、同轮只留最后一条，而 auto 通常晚于
+  gate 写入 —— 恰恰把真正拦过的那条挤掉。改成按 `(sid, turn)` 归并、同轮优先留 gate，再取
+  最后 20 轮。
+- **「拦截次数」把没拦的轮也算进去（K）。** `gates: all.length` 数的是事件条数，auto 轮也涨；
+  连带 `stats.gates === 0` 判断的「还没有拦截记录」提示**永不出现**。现在 `gates` 只数
+  `kind !== 'auto'` 的事件，另加 `autoRounds` / `events` 两个字段把口径拆开（`events` 保留原
+  `all.length` 语义，读旧字段的地方不受影响），`bySession` 行的 `gates` 同步修正，面板的
+  noData 判定改为「`gates === 0 && preCleaned === 0`」。
+
+### Fixed · 路径与体积（E/M）
+
+- **含空格的路径被切碎（E）。** 原来 `raw.split(/[\s;&|()<>]+/)` 先切、`unquote()` 只剥单个
+  token 的引号 —— 引号在切分前就没了。`rm -f "C:\Users\John Doe\a.txt"` 切成
+  `C:\Users\John` 与 `Doe\a.txt`，两段都 stat 不到；`cd "…/my dir" && rm x` 的 base 同样被切坏。
+  Windows 用户名带空格是常态，后果是「已释放空间」系统性少报。现在新增 `shellTokens()`
+  引号感知分词（单/双引号状态机，空白与 `;&|()<>` 为分隔符），明确不展开 `$VAR`、不处理
+  反斜杠转义 —— 只在「路径出现在命令串里」时用，够用即可。
+- **`measureSizes` 用 `stat` 记账（M）。** `stat` 跟随符号链接，链接目标的体积被记成「删掉
+  链接能腾出的空间」；硬链接（pnpm store、`cp -l`、Git worktree）删掉一个名字根本不释放
+  字节，却按整份 inode 计入。实测一条 5 MB 硬链接显示 `cleanedBytes = 5242880`，实际 0。
+  现在改 `lstat`，`isSymbolicLink()` 或 `nlink > 1` 一律记 0。`planBackups` 的成员收集同步改
+  `lstat`：符号链接 `.bak` 白占一个 `keep` 名额会把真备份挤进 `excess`。
+
+### Fixed · 中断与配置（G/J/H/N）
+
+- **`turn-stopping` 不读 `signal`（G）。** 宿主在派发前后都 `throwIfAborted()`，而插件在用户
+  按 Esc 之后仍会跑完 `scanTmpDir` + 每通道 `stat` + `planBackups` + `pruneBackups` +
+  `measureSizes`，最后还 `followup` 唤醒下一轮。现在解构 `signal` 并在 6 个位置检查：
+  入口、`canonicalCwd` 后、`scanTmpDir` 后、**prune 之前**（唯一不可逆动作）、记账之前、
+  发消息之前。刻意不用 `signal.throwIfAborted()` —— 它抛的 `AbortError` 会被外层 `catch`
+  记成 `gate error`，把用户主动中断污染成插件故障日志。
+- **相对 `logFile` 跟会话 cwd 漂移（J）。** 与 `statsFile` 显式用 `process.cwd()` 的基准不一致，
+  多会话会把日志写散到不同目录。保留原解析（改成 `process.cwd()` 会让已有配置换位置），但
+  每个**首次出现**的绝对路径打一行 `dsh-turn-cleanup: log file=<abs>`，事后可从进程日志查全集。
+- **`targetPath` 只认 `targetKey`（H）。** 宿主 `dsh-fs-local` 恒给 realpath 过的 `targetKey`，
+  但第三方工具 / 自定义 fs 实现 / 手工构造的 target 可能只填 `displayPath` —— 判空返回
+  `undefined` 会让写入侧一个路径都记不到、本轮临时件**全部静默漏报**。现在 `targetKey` 缺失
+  时依次回退 `displayPath` / `path` / `filePath` / `file_path` / `absPath`，拿未归一路径让
+  `insideCwd` 兜。
+- **占位 `undefined` 体积静默按 0 计入（N）。** 写入侧先 `set(abs, undefined)` 占位、等
+  `fs/observed` 回填；`dsh-ops` 这类不发 `fs/observed` 的工具就永远回填不上。不改记账（0 是
+  唯一可得的答案），在 `cardReportedHint` 补一句「个别未采到体积的按 0 计」。
+- **`cardComplianceHint` 没说清分母（F）。** 补「只算已复核的轮次」—— 未复核事件不进分母，
+  否则「拦了但永远没复核」的会话也拿 100%。
+
+### 不改的两条（`AUDIT-logic.md` D/I）
+
+- **`state`/`tripped` 残留（D）。** 核过宿主：`abort` 与 `error` 都会在 `finally` 里 append
+  `turn/end`，只有进程崩溃或 `sessions-quarantine` 才残留；残留纯内存、不落盘、重启即清。
+  改成 `WeakMap<session, Set<turn>>` 要动 `tripped` 的键格式，收益不抵风险。
+- **无熔断（I）。** 模型连续多轮不配合时闸门不会自我收敛（同一路径每轮都拦）。这是设计
+  缺口不是 bug：加 `strikes` 阈值会改变插件对外行为语义（什么时候放弃拦截、放弃后账怎么记），
+  需要单独设计，不夹在修缺陷里做。
+
+### Added
+
+- 配置 `mtimeToleranceMs`（默认 2000，0..60000）。
+- 账本 `version: 4`：`emptyVerify()` 增 `unknown` / `unknownTemps` / `unknownBackups`；
+  `summary()` 增 `unknown` 与 `sessionCount`；`turnRecord()` 同时按 `turn` 与 `verifyAtTurn`
+  匹配（修 `followup` 模式下徽章取不到记录）。
+- 日志 `prune-failed` 与 `prune-limit` 两行，形状见 README「日志」一节。
+- `trim()` 超 1000 条时**优先丢已复核过**的事件，保留还能被复核的。
+- `summary()` 增 `autoRounds` 与 `events` 两个字段（`gates` 改口径的配套，见上）；
+  `turnRecord()` 增 `own` 与 `carried`（徽章不再串轮）。
+- 测试从 57 / 32 / 48 / 31 / 17 涨到 **82 / 42 / 48 / 43 / 17 / 26**（合计 258 checks）：
+  备份家族识别、`keep: 0`、`x.bak.bak`、`scanDepth` 深度与越界、`tmpDirName` 归一、
+  `mtimeToleranceMs`、`maxPrunePerTurn`、路由 405 / 400、`bySession` 会话视图、账本并发
+  `load`、坏账本隔离，以及第六套 `test/regress.mjs` 专收 `AUDIT-logic.md` 里**在别的套件
+  构造不出来**的反例。CI 的 cross-platform job 补上 web / report / tool-agnostic / regress 四步。
+
+### 为什么测试没拦住
+
+三条 P0 全在测试的盲区里，共同形状是**测了「正常路径产出什么」，没测「异常路径毁掉什么」**：
+
+- `README.bak.md` 被删：所有备份家族测试都用 `makeFamily()` 造 `.bak-v<n>`，从来没有
+  「名字里带 `.bak` 但不是备份」的样本。补的断言是「`.bak.md` 仍在 + 同族只留 keep 份」，
+  把 `BACKUP_RE` 改回旧形状立刻红。
+- 账本被抹掉：所有账本测试都是「写完读回来」，进程没在中途被杀过，也就没有半截 JSON。
+  补的断言直接写一段截断 JSON 进 `statsFile`，验「不抛 + 留下 `.corrupt-` + 能继续追加」。
+- 并发 `load` 丢事件：测试全程是 `await` 串行的，`recordGate` 与读盘从不重叠。补的断言用
+  `Promise.all` 同时发三条 `recordGate`，并验 `load()` 两次返回同一个 Promise 身份。
+
+另一组（A/L/C/B/K/E/M）的盲区是**组合**，不是分支：232 条断言里没有一条同时构造
+`gate(N)` + `auto(N+1)`，于是「同轮两个事件抢一个复核点」「同轮去重留谁」这两种交互一次都
+没被跑到；也没有一条用例让 cwd 含空格，`shellTokens` 与旧 `split` 的差别无从暴露；`auto`
+事件从来只断言 `kind`，不问 `gates`。`test/regress.mjs` 的 26 条就是照这三个缺口长的：
+把六处修复逐一退回旧行为后，它会红 14 条（`12/26`），且失败详情与审查报告的症状逐字吻合 ——
+这条反向验证比「改完还是绿」更能说明测试确实卡在缺陷上。
+
+另外两条是「文档和实现对不上但都自洽」：`scanDepth` 文档写 4、实现只到 2；`tmpDirName`
+文档说相对 cwd、实现没做归一。这类只有把断言写成「第 4 层命中、第 5 层不命中」和
+「反斜杠输入命中 posix 路径」才会红。
+
 ## [0.7.3] - 2026-11-25
 
 0.7.2 把「最近记录」的释放体积改成喂整行 `freedBytes(row)`，但 0.7.2 那天没说清的一件

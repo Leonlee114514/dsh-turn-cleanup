@@ -270,10 +270,12 @@ await new Promise((r) => setTimeout(r, 60))
   await endTurn(ctx, agent)
 }
 
-// ── 场景 7：账本仍然是 v3，新字段没破坏结构 ────────────────────────────────
+// ── 场景 7：账本升到 v4，新字段没破坏结构 ──────────────────────────────────
 {
   const raw = JSON.parse(await readFile(statsFile, 'utf8'))
-  check('7 账本版本仍是 3', raw.version === 3, String(raw.version))
+  // v4 引入了 unknown 三态、preCleanedOmitted、seq 等字段；版本号必须跟着走，
+  // 否则 v3 账本与 v4 账本无法区分，迁移逻辑没有判据。
+  check('7 账本版本是 4', raw.version === 4, String(raw.version))
   const auto = raw.events.find((e) => e.sid === 'sess-agnostic-auto')
   check('7 auto 事件的 preCleaned 带体积', Array.isArray(auto?.preCleaned) && auto.preCleaned[0]?.size === 96,
     JSON.stringify(auto?.preCleaned))

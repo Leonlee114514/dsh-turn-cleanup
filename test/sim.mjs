@@ -553,6 +553,185 @@ await scenario('22 fs/delete-intent 不误报', {
   }
 }
 
+// 26 README.bak.md 不是 README 的备份。老 BACKUP_RE 把 .bak 之后的任何后缀都当家族成员，
+//    prune 模式下会连带删掉用户自己命名的文档 —— README.bak.md 被算成 README 的备份。
+{
+  const root = base + '/s26'
+  await makeFamily(root, 'README', 4)
+  await writeFile(join(root, 'README.bak.md'), 'user doc')
+  await scenario('26 README.bak.md 不算备份', {
+    root,
+    recorded: ['README'],
+    expectSteer: false,
+    config: { backupRetention: { keep: 1, mode: 'prune' } }
+  })
+  check('26 用户文档存活', await exists(join(root, 'README.bak.md')))
+  const alive = []
+  for (const n of ['README.bak-v0', 'README.bak-v1', 'README.bak-v2', 'README.bak-v3']) {
+    if (await exists(join(root, n))) alive.push(n)
+  }
+  check('26 只删最旧的 3 份', alive.join(',') === 'README.bak-v3', alive.join(',') || '-')
+}
+
+// 27 keep=0 回落到默认 3。老实现把它静默夹成 1 —— 配 3 份的人醒来发现只剩 1 份。
+{
+  const root = base + '/s27'
+  const names = await makeFamily(root, 'app.log', 6)
+  await scenario('27 keep=0 回落 3', {
+    root,
+    recorded: ['app.log'],
+    expectSteer: false,
+    config: { backupRetention: { keep: 0, mode: 'prune' } }
+  })
+  const alive = []
+  for (const n of names) if (await exists(join(root, n))) alive.push(n)
+  check('27 删 3 留 3', alive.length === 3, 'alive=' + (alive.join(',') || '-'))
+}
+
+// 28 a.txt.bak.bak 不并入 a.txt 家族（老实现按前缀 startsWith 归桶，会把它算进去）。
+//    把它的 mtime 设成最旧：真被算进家族，prune 一定先删它。
+{
+  const root = base + '/s28'
+  const names = await makeFamily(root, 'a.txt', 5)
+  await writeFile(join(root, 'a.txt.bak.bak'), 'double')
+  await utimes(join(root, 'a.txt.bak.bak'), 1699999900, 1699999900)
+  await scenario('28 x.bak.bak 不并入原件家族', {
+    root,
+    recorded: ['a.txt'],
+    expectSteer: false,
+    config: { backupRetention: { keep: 3, mode: 'prune' } }
+  })
+  const alive = []
+  for (const n of names) if (await exists(join(root, n))) alive.push(n)
+  check('28 只删最旧 2 份', alive.sort().join(',') === 'a.txt.bak-v2,a.txt.bak-v3,a.txt.bak-v4', alive.join(',') || '-')
+  check('28 a.txt.bak.bak 未被牵连', await exists(join(root, 'a.txt.bak.bak')))
+}
+
+// 29 约定目录扫描深度：scanDepth=4 报到第 4 层，第 5 层不报（老实现只到第 2 层）。
+{
+  const root = base + '/s29'
+  // files 里必须是 root 相对路径（scenario 内部再 join(root, f)）
+  const tooDeep = join(root, '.agent-tmp/a/b/c/d/probe-too-deep.mjs')
+  await mkdir(join(tooDeep, '..'), { recursive: true })
+  await writeFile(tooDeep, 'x')
+  const r = await scenario('29 scanDepth=4 报到第 4 层', {
+    root,
+    files: ['.agent-tmp/a/b/c/probe-deep.mjs'],
+    expectSteer: true
+  })
+  const text = r.steered[0]?.content[0].text ?? ''
+  check('29 第 4 层命中', text.includes('probe-deep.mjs'), text.slice(0, 60))
+  check('29 第 5 层不报', !text.includes('probe-too-deep'), text.slice(0, 60))
+}
+
+// 29b 约定目录越界（../escape 指到工作区外）必须直接放弃，不能顺着走。
+{
+  const root = base + '/s29b'
+  const escapeDir = join(root, '..', 'escape-s29b')
+  await mkdir(escapeDir, { recursive: true })
+  await writeFile(join(escapeDir, 'probe-out.mjs'), 'x')
+  const r = await scenario('29b 约定目录越界不扫', {
+    root,
+    expectSteer: false,
+    config: { tmpDirName: '../escape-s29b' }
+  })
+  check('29b 工作区外文件不报', r.steers === 0, 'steers=' + r.steers)
+  await rm(escapeDir, { recursive: true, force: true })
+}
+
+// 30 tmpDirName 反斜杠归一成 posix；绝对路径 / 盘符回落默认目录。
+{
+  const root = base + '/s30a'
+  await mkdir(join(root, 'tmp/agent'), { recursive: true })
+  await writeFile(join(root, 'tmp/agent/junk.log'), 'x')
+  const r = await scenario('30a tmpDirName 反斜杠可用', {
+    root,
+    expectSteer: true,
+    config: { tmpDirName: 'tmp\\agent' }
+  })
+  const text = r.steered[0]?.content[0].text ?? ''
+  check('30a 反斜杠归一后命中', text.includes('tmp/agent/junk.log'), text.slice(0, 80))
+}
+{
+  const root = base + '/s30b'
+  await mkdir(join(root, '.agent-tmp'), { recursive: true })
+  await writeFile(join(root, '.agent-tmp/junk.log'), 'x')
+  await writeFile(join(root, 'probe-no.mjs'), 'x')
+  const r = await scenario('30b 盘符绝对路径回落默认', {
+    root,
+    expectSteer: true,
+    config: { tmpDirName: 'D:\\x' }
+  })
+  const text = r.steered[0]?.content[0].text ?? ''
+  check('30b 回落 .agent-tmp', text.includes('.agent-tmp/junk.log'), text.slice(0, 80))
+  check('30b 不用盘符目录', !text.includes('D:/x'), text.slice(0, 80))
+}
+
+// 31 mtime 容差：容差 0 时「本轮开始前 500ms 写的」算老文件；容差 2000 时算本轮产物。
+//    FAT32/exFAT 2s 粒度、SMB 1s 粒度下，硬编码 1000ms 会必假阴性。
+async function toleranceProbe(label, toleranceMs) {
+  const root = base + '/' + label
+  const abs = join(root, 'probe-tol.mjs')
+  const ctx = makeCtx()
+  const cfg = toleranceMs === null ? {} : { mtimeToleranceMs: toleranceMs }
+  apply(ctx, { enabled: true, stats: false, ...cfg })
+  const { agent, steered } = makeAgent(root)
+  const session = agent.session
+  await mkdir(root, { recursive: true })
+  await writeFile(abs, 'x')
+  ctx.emitPlain('session/event', session, { type: 'turn/start', data: { turn: 1 } })
+  const callId = 'call-tol-' + label
+  ctx.emitPlain('session/event', session, {
+    type: 'tool/call',
+    data: { turn: 1, step: 1, callId, name: 'write_file', arguments: JSON.stringify({ path: abs }) }
+  })
+  const old = (Date.now() - 500) / 1000
+  await utimes(abs, old, old)
+  ctx.emitPlain('session/event', session, {
+    type: 'tool/result',
+    data: {
+      turn: 1,
+      step: 1,
+      message: {
+        role: 'tool',
+        source: { kind: 'tool', callId },
+        toolCallId: callId,
+        content: [{ type: 'text', text: 'ok' }]
+      }
+    }
+  })
+  await ctx.emitSerial('agent/turn-stopping', { agent, turn: 1, signal: new AbortController().signal })
+  return steered.length
+}
+{
+  const zero = await toleranceProbe('s31-zero', 0)
+  check('31 容差 0 · 500ms 前的不算本轮', zero === 0, 'steers=' + zero)
+  const dflt = await toleranceProbe('s31-default', null)
+  check('31 默认 2000ms · 500ms 前的算本轮', dflt === 1, 'steers=' + dflt)
+}
+
+// 32 每轮删除条数上限：maxPrunePerTurn=1 时只删 1 份，其余留给下一轮，并留 prune-limit 告警。
+{
+  const root = base + '/s32'
+  const names = await makeFamily(root, 'cap.yml', 6)
+  const before = log.length
+  const r = await scenario('32 maxPrunePerTurn 生效', {
+    root,
+    recorded: ['cap.yml'],
+    expectSteer: true,
+    config: { backupRetention: { keep: 2, mode: 'prune', maxPrunePerTurn: 1 } }
+  })
+  const alive = []
+  for (const n of names) if (await exists(join(root, n))) alive.push(n)
+  check('32 只删 1 份', alive.length === 5, 'alive=' + alive.length)
+  const lines = log.slice(before).map(([, m]) => m)
+  const pruneLine = lines.find((m) => m.includes('prune ') && m.includes('deleted=1'))
+  check('32 留 prune 日志', pruneLine !== undefined, pruneLine?.slice(0, 70) ?? 'missing')
+  const limitLine = lines.find((m) => m.includes('prune-limit'))
+  check('32 留 prune-limit 告警', limitLine !== undefined, limitLine?.slice(0, 70) ?? 'missing')
+  check('32 未删完仍催模型', r.steers > 0, 'steers=' + r.steers)
+}
+
 console.log('\n=== 日志样本 ===')
 // 15 steerMode:'steer' → 同轮多跑一步（硬闸门），文案照旧
 await scenario('15 steerMode steer', {

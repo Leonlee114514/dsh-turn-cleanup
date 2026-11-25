@@ -48,6 +48,7 @@
 #   protectedSegments  .git node_modules out dist build target vendor
 #                      .venv __pycache__
 #   tmpDirName .agent-tmp · scanDepth 4 · maxLogPaths 10 · maxSteerPaths 20
+#   mtimeToleranceMs 2000 (channel 4 mtime slack, 0..60000)
 #   logFile "" (no text log) · stats true · statsFile "" ($DSH_HOME/logs)
 #   messageLocale auto · steerMode followup
 #   backupRetention { enabled true, keep 3, mode steer,

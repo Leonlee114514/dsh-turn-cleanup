@@ -223,6 +223,56 @@ check('未拦截的 turn 返回 null', missTurn.json === null, JSON.stringify(mi
 const badScope = await callRoute('/turn-cleanup/stats?scope=session')
 check('session 但无 sid → 退回汇总', badScope.json.scope === 'all', badScope.json.scope)
 
+// 路由的 method / 参数校验：宿主 handler 型路由任何 method 都会派发进来，
+// 老实现只管 GET，POST/PUT 也能跑通并返回数据；turn 非数字时抛到 500 而不是 400。
+async function callRouteWith(url, method) {
+  return await new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 0,
+      headers: null,
+      body: '',
+      writeHead(code, headers) { this.statusCode = code; this.headers = headers },
+      end(chunk) { this.body += chunk ?? ''; resolve({ code: this.statusCode, headers: this.headers, json: (() => { try { return JSON.parse(this.body || 'null') } catch { return undefined } })() }) }
+    }
+    Promise.resolve(routes[0].handler({ url, method }, res)).catch(reject)
+  })
+}
+
+const post = await callRouteWith('/turn-cleanup/stats', 'POST')
+check('非 GET → 405', post.code === 405, 'code=' + post.code)
+check('405 带 allow 头', String(post.headers?.allow ?? '').includes('GET') && String(post.headers?.allow ?? '').includes('HEAD'),
+  String(post.headers?.allow))
+check('405 body 是错误对象', post.json?.error === 'method not allowed', JSON.stringify(post.json))
+
+const head = await callRouteWith('/turn-cleanup/stats', 'HEAD')
+check('HEAD 放行', head.code === 200, 'code=' + head.code)
+
+const badTurn = await callRouteWith('/turn-cleanup/stats?sid=sess-web-1&turn=abc', 'GET')
+check('turn 非数字 → 400', badTurn.code === 400, 'code=' + badTurn.code + ' body=' + JSON.stringify(badTurn.json))
+check('400 带说明', typeof badTurn.json?.error === 'string' && badTurn.json.error.length > 0, JSON.stringify(badTurn.json))
+
+const noSid = await callRouteWith('/turn-cleanup/stats?turn=7', 'GET')
+check('turn 有值但 sid 空 → 400', noSid.code === 400, 'code=' + noSid.code)
+
+// 会话视图死锁：bySession 曾用「过滤后的事件」聚合，?scope=session 时只剩一行，
+// 面板的会话下拉永远只有一个选项、对比表恒隐藏。现在恒基于全量。
+const second = { id: 'sess-web-2', header: { cwd, origin: 'user', delegationDepth: 0 } }
+const agent2 = { session: second, status: 'running', steered: [], steer(m) { this.steered.push(m) } }
+await ctx.emitPlain('session/event', second, { type: 'turn/start', data: { turn: 1 } })
+const probe2 = join(cwd, 'probe-second.mjs')
+await writeFile(probe2, 'y')
+await ctx.emitWaterfall('fs/write-intent', { targetKey: probe2 }, { agent: agent2 }, () => undefined)
+await ctx.emitPlain('fs/observed', { targetKey: probe2 }, { kind: 'present' }, { agent: agent2 })
+await ctx.emitSerial('agent/turn-stopping', { agent: agent2, turn: 1, signal: new AbortController().signal })
+await ctx.emitPlain('session/event', second, { type: 'turn/end', data: { turn: 1 } })
+await new Promise((r) => setTimeout(r, 80))
+
+const scoped = await callRoute('/turn-cleanup/stats?scope=session&sid=sess-web-1')
+check('会话视图仍列出全部会话', (scoped.json.bySession ?? []).length === 2,
+  JSON.stringify((scoped.json.bySession ?? []).map((r) => r.sid)))
+check('会话视图 sessionCount=2', scoped.json.sessionCount === 2, String(scoped.json.sessionCount))
+check('会话视图只统计本会话的 gates', scoped.json.gates === 1, String(scoped.json.gates))
+
 // 统计关闭时不该注册路由
 const injects2 = []
 const ctx2 = {
