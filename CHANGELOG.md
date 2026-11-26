@@ -58,6 +58,16 @@ GitHub Actions 默认在前一个 step 失败后跳过后续 step。`Behaviour s
 本地一直绿是因为 Windows 非管理员建不了 file symlink，场景 11 走 SKIP —— 这个 SKIP 分支
 本身是对的（区分「跳过了」和「失败了」），但它掩盖了 Linux 上真跑时的失败。
 
+修完 `5892e4b` 的 CI（run `45728490518`）五个 job 全绿：`test (20/22/24)`、
+`cross-platform (windows-latest)`、`cross-platform (macos-latest)`。逐 step 核对过，
+七个测试 step 都是真的执行（各自有独立时间戳），不是被 skip 后算作通过。
+
+**一个需要注意的数字差**：本机 `sim` 报 **82** 项，CI 报 **87** 项。差的那 5 项正是场景 11
+的符号链接断言 —— 本机建不了 symlink 走一条 `SKIP`（计 1 项通过），runner 上真跑 6 项。
+所以本地合计 258、CI 合计 263。看到本机比 CI 少 5 项是正常的，反过来才要查。
+`test/sim.mjs` 里那 5 条符号链接断言现在在 CI 上真跑并通过（`alive=0,2,3`、
+`steers=1`、链接目标未受影响），这是 0.8.0 那个 `lstat` 回归被真正堵住的证据。
+
 ## [0.8.0] - 2026-11-25
 
 这一版没有新功能，是一次从头到尾的代码逻辑审查之后的集中修复。三轮只读审查共 72 条发现

@@ -612,7 +612,8 @@ RPC 契约轻得多，也不用管 relay / 远程模式的 origin 探测。
 单元测试用假 ctx 模拟 agent-loop 的调用顺序，不依赖 DSH 运行时：
 
 ```bash
-npm test        # 82 + 42 + 48 + 43 + 17 + 26 = 258 checks passed
+npm test        # 82 + 42 + 48 + 43 + 17 + 26 = 258 checks passed（本机）
+                # CI 上是 87 + 42 + 48 + 43 + 17 + 26 = 263 —— 见下
 npm run verify  # syntax check + test
 ```
 
@@ -636,6 +637,10 @@ StatsStore 与 `/turn-cleanup/stats` 端点、体积字段（含 `recent[]` 行�
 > 是指向 `/private/var` 的符号链接、Windows runner 落在 `RUNNER~1` 8.3 短名），而插件对
 > cwd 做 realpath，`insideCwd` 于是恒判否、所有场景 `steers=0`。五个套件现在统一
 > `await realpath(rootRaw)`。
+>
+> 顺带一个数字差异：本机 `sim` 是 82 项，CI 上是 87 项。差的 5 项就是场景 11 的符号链接
+> 断言 —— Windows 非管理员建不了 file symlink，本机走一条 `SKIP`（计 1 项通过），
+> runner 上真跑 6 项。**看到本机比 CI 少 5 项是正常的，反过来才要查。**
 
 `test/sim.mjs` 里有几项是**可移植性回归**，专门锁住「本机能跑、别人机器上误伤/漏报」的坑：
 正常业务文件名（`checkout.js` / `Checklist.md` / `benchmark.ts`）不误伤、带分隔符的
