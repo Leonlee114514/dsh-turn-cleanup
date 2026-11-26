@@ -10,7 +10,7 @@
 //   K  kind='auto' 不算一次拦截
 //   E  带引号的含空格路径不许被切碎
 //   M  多链接文件删掉一个名字不释放字节，体积记 0
-import { mkdtemp, writeFile, mkdir, rm, link } from 'node:fs/promises'
+import { mkdtemp, writeFile, mkdir, rm, link, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply } from '../lib/index.js'
@@ -22,7 +22,10 @@ function check(label, pass, detail) {
   console.log(`${pass ? 'PASS' : 'FAIL'}  ${label}${detail ? '  — ' + detail : ''}`)
 }
 
-const root = await mkdtemp(join(tmpdir(), 'tc-regress-'))
+const rootRaw = await mkdtemp(join(tmpdir(), 'tc-regress-'))
+// macOS 的 tmpdir() 是 /var/folders/…（指向 /private/var/… 的符号链接）。
+// 插件对 cwd 做 canonicalCwd（realpath），未归一的 root 会让 insideCwd 判否。
+const root = await realpath(rootRaw)
 const cwd = join(root, 'ws')
 await mkdir(cwd, { recursive: true })
 

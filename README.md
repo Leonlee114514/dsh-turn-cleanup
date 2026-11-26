@@ -626,7 +626,16 @@ StatsStore 与 `/turn-cleanup/stats` 端点、体积字段（含 `recent[]` 行�
 `test/tool-agnostic.mjs` 覆盖通道 4 的不认工具名采集（17 项）。`test/regress.mjs` 专收
 `AUDIT-logic.md` 里**在别的套件构造不出来**的反例：同轮 `gate(N)` + `auto(N+1)` 抢同一个
 复核点、纯 `auto` 账本不该涨「拦截次数」、cwd 含空格的路径提取、多链接文件的体积口径
-（26 项）。六份都在 CI 里跑（ubuntu × node 20/22/24，加 windows/macos）。
+（26 项）。六份都在 CI 里跑（ubuntu × node 20/22/24，加 windows/macos），七个测试 step
+全部带 `if: always()` —— 一个套件红不该把其余证据一起吞掉。
+
+> **0.8.1 补充**：这六个套件曾经在 CI 里只有 `test/sim.mjs` 真正跑过，因为 GitHub 默认在
+> 前一步失败后 skip 后续 step，而 `sim` 自 2026-11-14 起连红 9 次。红的原因不是插件，
+> 是测试自己的两个隐式假设：断言写死中文原文却让 `messageLocale` 走 `auto`（runner 的
+> `LANG=C.UTF-8` → `en`）；以及用未归一的 `tmpdir()` 当工作区（macOS 的 `/var/folders`
+> 是指向 `/private/var` 的符号链接、Windows runner 落在 `RUNNER~1` 8.3 短名），而插件对
+> cwd 做 realpath，`insideCwd` 于是恒判否、所有场景 `steers=0`。五个套件现在统一
+> `await realpath(rootRaw)`。
 
 `test/sim.mjs` 里有几项是**可移植性回归**，专门锁住「本机能跑、别人机器上误伤/漏报」的坑：
 正常业务文件名（`checkout.js` / `Checklist.md` / `benchmark.ts`）不误伤、带分隔符的

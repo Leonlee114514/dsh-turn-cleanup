@@ -1,7 +1,7 @@
 // 本地行为验证：用假 ctx 模拟 agent-loop 的调用顺序，不依赖 DSH 运行时。
 // 覆盖：正例 / 约定目录 / 交付物反例 / 存量反例 / 防抖 / 子会话 / 禁用 /
 //       备份保留（steer 模式、prune 模式、原件缺失、符号链接、keep 边界）。
-import { mkdir, writeFile, rm, stat, symlink, utimes } from 'node:fs/promises'
+import { mkdir, writeFile, rm, stat, symlink, utimes, realpath } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { apply, name, inject } from '../lib/index.js'
@@ -193,8 +193,14 @@ async function makeFamily(root, stem, count, { withOriginal = true, startSec = 1
   return names
 }
 
-const base = join(tmpdir(), 'dsh-turn-cleanup-test')
-await rm(base, { recursive: true, force: true })
+const baseRaw = join(tmpdir(), 'dsh-turn-cleanup-test')
+await rm(baseRaw, { recursive: true, force: true })
+await mkdir(baseRaw, { recursive: true })
+// 必须归一：macOS 上 tmpdir() 是 /var/folders/…，它本身是指向 /private/var/… 的
+// 符号链接。插件在 turn-stopping 里对 cwd 做 canonicalCwd（realpath），而这里的
+// root 若停在未归一的写法，insideCwd 会算出 ../../..，整机所有场景都不拦。
+// Windows 与 Linux 上 realpath 是恒等变换，不影响既有行为。
+const base = await realpath(baseRaw)
 
 // 1 正例：probe-test-*.mjs
 const r1 = await scenario('1 正例 probe-test', {
@@ -275,7 +281,9 @@ await scenario('6 子会话 subagent', {
     recorded: ['cordis.patch.yml'],
     expectSteer: true,
     expectFiles: names,
-    config: { backupRetention: { keep: 3 } }
+    // 下面的断言比的是中文原文，必须把语言钉死。默认 auto 会走 LANG/LC_ALL 回退链，
+    // CI 的 ubuntu runner 是 C.UTF-8/en_US.UTF-8 → 解析成 en → 文案变英文 → 断言红。
+    config: { backupRetention: { keep: 3 }, messageLocale: 'zh' }
   })
   const text = r.steered[0]?.content[0].text ?? ''
   const listed = (text.match(/\.bak-v\d/g) ?? []).length
@@ -313,7 +321,7 @@ await scenario('6 子会话 subagent', {
     root,
     recorded: ['gone.txt.bak-v0'],
     expectSteer: true, // 通道 2 把 .bak-v0 当临时件报出，这是预期行为
-    config: { backupRetention: { keep: 3, mode: 'prune' } }
+    config: { backupRetention: { keep: 3, mode: 'prune' }, messageLocale: 'zh' }
   })
   const text = r.steered[0]?.content[0].text ?? ''
   const alive = []
@@ -400,7 +408,7 @@ await scenario('6 子会话 subagent', {
     files: ['probe-z.mjs'],
     recorded: ['cfg.yml'],
     expectSteer: true,
-    config: { backupRetention: { keep: 3 } }
+    config: { backupRetention: { keep: 3 }, messageLocale: 'zh' }
   })
   const text = r.steered[0]?.content[0].text ?? ''
   check('13 共存 · 文案含临时件段', text.includes('收尾前清场'), 'temp section')

@@ -1,6 +1,6 @@
 {
   "name": "dsh-turn-cleanup",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "DeepSeek Harness 的收尾清场闸门：每轮 turn 结束时检查本轮写入的临时文件和超量 .bak 备份，非空就把清单推回给模型，由它删掉或说明理由。模型可用 report_temp_cleanup 上报自己删掉的路径与体积，另有 Web 面板统计拦截次数、已清文件数、释放空间与依从率。",
   "type": "module",
   "main": "lib/index.js",

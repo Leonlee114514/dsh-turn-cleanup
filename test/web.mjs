@@ -3,7 +3,7 @@
 //   2) turn/end 之后 verify 把「已清 / 仍在」算对
 //   3) 注册的 HTTP 路由按 query 返回三种形状（汇总 / 单会话 / 单 turn）
 // 不依赖 DSH 运行时，几秒跑完。
-import { mkdtemp, writeFile, mkdir, unlink, rm } from 'node:fs/promises'
+import { mkdtemp, writeFile, mkdir, unlink, rm, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply } from '../lib/index.js'
@@ -14,7 +14,11 @@ function check(label, pass, detail) {
   console.log(`${pass ? 'PASS' : 'FAIL'}  ${label}${detail ? '  — ' + detail : ''}`)
 }
 
-const root = await mkdtemp(join(tmpdir(), 'tc-web-'))
+const rootRaw = await mkdtemp(join(tmpdir(), 'tc-web-'))
+// 必须归一：macOS 上 tmpdir() 是 /var/folders/…，它本身是指向 /private/var/…
+// 的符号链接。插件对 cwd 做 canonicalCwd（realpath），root 停在未归一的写法会让
+// insideCwd 算出 ../../..，整机所有场景都不拦。Windows/Linux 上是恒等变换。
+const root = await realpath(rootRaw)
 const cwd = join(root, 'ws')
 await mkdir(cwd, { recursive: true })
 const statsFile = join(root, 'logs', 'stats.json')

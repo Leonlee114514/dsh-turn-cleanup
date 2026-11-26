@@ -6,7 +6,7 @@
 //   1) write/edit intent 落盘那一刻就把体积记进 state（文件还没被删，量得到）；
 //   2) 模型用 rm -f 删掉、插件拿不到体积时，靠 report_temp_cleanup 主动上报。
 // 这个文件把两条链路各跑一遍，断言账本里真的记上了字节。
-import { mkdtemp, writeFile, mkdir, rm, readFile, readdir } from 'node:fs/promises'
+import { mkdtemp, writeFile, mkdir, rm, readFile, readdir, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply } from '../lib/index.js'
@@ -18,7 +18,10 @@ function check(label, pass, detail) {
   console.log(`${pass ? 'PASS' : 'FAIL'}  ${label}${detail ? '  — ' + detail : ''}`)
 }
 
-const root = await mkdtemp(join(tmpdir(), 'tc-report-'))
+const rootRaw = await mkdtemp(join(tmpdir(), 'tc-report-'))
+// macOS 的 tmpdir() 是 /var/folders/…（指向 /private/var/… 的符号链接）。
+// 插件对 cwd 做 canonicalCwd（realpath），未归一的 root 会让 insideCwd 判否。
+const root = await realpath(rootRaw)
 const cwd = join(root, 'ws')
 await mkdir(cwd, { recursive: true })
 const statsFile = join(root, 'logs', 'stats.json')

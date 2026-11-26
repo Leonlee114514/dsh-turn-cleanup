@@ -46,7 +46,14 @@ jobs:
       #       备份保留（steer 与 prune 两种模式）/ protectedSegments / 三个 intent 事件 /
       #       messageLocale / workingDirectory 与 realpath 归一 / 备份家族识别 /
       #       scanDepth / tmpDirName 归一 / mtimeToleranceMs / maxPrunePerTurn。
+      #
+      # 从这里往下每个测试 step 都带 `if: always()`。原因不是洁癖：2026-11-14 起
+      # 这一步连红 9 次，而 GitHub 默认在前一步失败后 skip 后续 step —— 于是
+      # web/client/report/tool-agnostic/regress 这五个套件在 CI 里**一次都没跑过**，
+      # 谁也不知道它们是不是也红。测试套房的价值在于「红的时候能告诉你哪里红」，
+      # 一个失败不该把其余四个证据一起吞掉。
       - name: Behaviour simulation
+        if: always()
         run: node test/sim.mjs
 
       # 下面四个也必须在 CI 里跑，只在本机 npm test 里跑等于把最容易随宿主升级
@@ -54,21 +61,26 @@ jobs:
       # client.mjs 验浏览器 bundle 契约，report.mjs 验工具与账本损坏/并发自愈，
       # tool-agnostic.mjs 验「不依赖具体工具名」的路径提取。
       - name: Web panel route (fake webServer, no socket)
+        if: always()
         run: node test/web.mjs
 
       - name: Client bundle contract (fake __ModuleLoader__)
+        if: always()
         run: node test/client.mjs
 
       - name: Ledger, tool and self-healing (real fs, temp dirs)
+        if: always()
         run: node test/report.mjs
 
       - name: Tool-agnostic path harvesting
+        if: always()
         run: node test/tool-agnostic.mjs
 
       # 回归现场：gate(N) 与 auto(N+1) 撞同一个复核点、同轮 gate+auto 的 recent、
       # 纯 auto 账本的拦截计数、带引号的含空格路径、多链接文件的体积。
       # 这几条在别的套件里构造不出来，所以它们曾经全绿而缺陷仍在。
       - name: Regression cases from AUDIT-logic.md
+        if: always()
         run: node test/regress.mjs
 
       # 插件必须能在任何 OS 上跑：路径分隔符、大小写敏感性、临时目录位置都不同。
@@ -109,21 +121,27 @@ jobs:
       # realpath / junction 归一在 Windows 上最容易翻车：sim.mjs 里场景 25 建目录联接，
       # 建不出来会打 SKIP 而不是 FAIL —— CI 必须把两者区分开，否则真回归会被当成跳过。
       - name: Behaviour simulation
+        if: always()
         run: node test/sim.mjs
 
       - name: Web panel route (fake webServer, no socket)
+        if: always()
         run: node test/web.mjs
 
       - name: Client bundle contract (fake __ModuleLoader__)
+        if: always()
         run: node test/client.mjs
 
       - name: Ledger, tool and self-healing (real fs, temp dirs)
+        if: always()
         run: node test/report.mjs
 
       - name: Tool-agnostic path harvesting
+        if: always()
         run: node test/tool-agnostic.mjs
 
       # Windows 是含空格路径与多链接文件最真实的地方：用户目录常带空格，
       # Git worktree / pnpm store 大量用硬链接。
       - name: Regression cases from AUDIT-logic.md
+        if: always()
         run: node test/regress.mjs

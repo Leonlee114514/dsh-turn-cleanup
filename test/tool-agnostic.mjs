@@ -11,7 +11,7 @@
 //
 // 另一条硬边界：cwd 之外的文件（%TEMP%、~/.cache）只进 preCleaned 记账，
 // 绝不进 steer 清单 —— 插件不指挥模型去删工作区外面的东西。
-import { mkdtemp, writeFile, mkdir, rm, readFile, utimes } from 'node:fs/promises'
+import { mkdtemp, writeFile, mkdir, rm, readFile, utimes, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply } from '../lib/index.js'
@@ -23,7 +23,10 @@ function check(label, pass, detail) {
   console.log(`${pass ? 'PASS' : 'FAIL'}  ${label}${detail ? '  — ' + detail : ''}`)
 }
 
-const root = await mkdtemp(join(tmpdir(), 'tc-agnostic-'))
+const rootRaw = await mkdtemp(join(tmpdir(), 'tc-agnostic-'))
+// macOS 的 tmpdir() 是 /var/folders/…（指向 /private/var/… 的符号链接）。
+// 插件对 cwd 做 canonicalCwd（realpath），未归一的 root 会让 insideCwd 判否。
+const root = await realpath(rootRaw)
 const cwd = join(root, 'ws')
 const outside = join(root, 'outside')
 await mkdir(cwd, { recursive: true })

@@ -4,6 +4,60 @@
 每条写「为什么」而不只是「改了什么」—— 这个插件的坑大多来自 DSH 宿主的隐式约定，
 不记下来下次还会踩。
 
+## [0.8.1] - 2026-11-26
+
+0.8.0 发出去之后，有人问了一句「不同环境兼容与适配性仍能保持吧」。查 GitHub Actions 的历史，
+答案是**不能** —— 而且不是 0.8.0 引入的。
+
+### Fixed · 测试在非中文 locale 的机器上必然红
+
+`test/sim.mjs` 场景 8/10/13 的断言比的是中文原文（`最近 3 份` / `收尾前清场` / `备份超量`），
+但场景没钉 `messageLocale`，走的是 `auto` 回退链（`DSH_LOCALE` → `LC_ALL` → `LC_MESSAGES` →
+`LANGUAGE` → `LANG` → `Intl` → `'en'`）。GitHub 的 ubuntu runner `LANG` 是 `C.UTF-8`，解析成
+`en`，文案变英文，三条断言全红。同一段代码在中文机器上永远绿、在 CI 上永远红 —— 这是测试
+的隐式假设，不是产品缺陷。三处显式钉 `messageLocale: 'zh'`。
+
+### Fixed · 测试的 root 未归一，在 macOS 与 Windows runner 上整机失效
+
+五个套件都用 `mkdtemp(join(tmpdir(), …))` 当 root/D 工作区，而插件在 `agent/turn-stopping` 里
+对 cwd 做 `canonicalCwd`（realpath）。两处偏差让 `insideCwd` 恒判否：
+
+- **macOS**：`tmpdir()` 是 `/var/folders/…`，它本身是指向 `/private/var/…` 的符号链接。
+  CI 日志里能直接看到成对的两行：插件记的是 `cwd=/private/var/folders/q2/…`，而测试写的是
+  `/var/folders/q2/…`。
+- **Windows runner**：`tmpdir()` 落在 `C:\Users\RUNNER~1\…` 这个 8.3 短名形态下，插件记的
+  是 `C:\Users\runneradmin\…`。
+
+后果是 `steers=0` 淹没几乎所有场景，连「1 正例」都不拦 —— 在 CI 上看起来像插件完全失效。
+现在五个套件统一 `const root = await realpath(rootRaw)`。Windows/Linux 本机上 realpath 是
+恒等变换，既有行为不变。
+
+### Fixed · `planBackups` 被误改成 `lstat`，符号链接备份导致整族不产出 plan
+
+0.8.0 修 `measureSizes` 的体积口径时（AUDIT 缺陷 M），顺手把 `planBackups` 里收集成员的
+`stat` 也改成了 `lstat`，理由写的是「符号链接 `.bak` 白占 keep 名额」。这条**没有**在审查
+报告里，是修 bug 时自己加的。
+
+它是错的：`test/sim.mjs` 场景 11 原本就写明 `stat`（跟链）是刻意设计 —— 指向别处的 `.bak`
+要**算作一个成员**，因为它确实占了「最近 keep 份」的一个名额，也因此该被列进清单让模型
+看一眼。改成 `lstat` 后链接被 `!info.isFile()` 排除，`members` 少一个就可能掉到
+`members.length <= keep`，于是整族不产出 plan：既不删该删的，也不再报链接。删除环节本来
+就由 `pruneBackups` 的 `lstat + isSymbolicLink` 拒绝，那里才是该守卫的地方。已回退为 `stat`。
+
+### Fixed · CI 前一步失败会把后面五个套件全 skip
+
+GitHub Actions 默认在前一个 step 失败后跳过后续 step。`Behaviour simulation` 自 2026-11-14
+`18b96b3` 起连续红 9 次（含 `6462a35`），于是 `web` / `client` / `report` / `tool-agnostic` /
+`regress` 这五个套件在 CI 里**一次都没跑过**。七个测试 step 现在都带 `if: always()`：
+一个套件红不该把其余证据一起吞掉。
+
+### 顺带记录
+
+这次核查的结论是「CI 自 2026-11-14 起就没有绿过」，最后一次 success 是 `da7be93`
+（2026-11-11，v0.3.2）。失败全部集中在 `test/sim.mjs`，也就是唯一一个真正跑在 CI 里的套件。
+本地一直绿是因为 Windows 非管理员建不了 file symlink，场景 11 走 SKIP —— 这个 SKIP 分支
+本身是对的（区分「跳过了」和「失败了」），但它掩盖了 Linux 上真跑时的失败。
+
 ## [0.8.0] - 2026-11-25
 
 这一版没有新功能，是一次从头到尾的代码逻辑审查之后的集中修复。三轮只读审查共 72 条发现
